@@ -534,6 +534,10 @@ class MainWindow(QMainWindow):
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
 
+    def _show_status(self, msg: str):
+        self.status_bar.showMessage(f"   {msg}", 100000)
+
+
     def closeEvent(self, event):
         for worker in list(self._workers.values()):
             worker.stop()
@@ -552,20 +556,28 @@ class MainWindow(QMainWindow):
         QApplication.instance().setStyleSheet(
             DARK_THEME if self.is_dark else LIGHT_THEME
         )
-        self.theme_btn.setText("☀  Light" if self.is_dark else "🌙  Dark")
-        border = "#30363d" if self.is_dark else "#d0d7de"
-        tb_bg  = "#161b22" if self.is_dark else "#f6f8fa"
-        rb_bg  = "#0d1117" if self.is_dark else "#f6f8fa"
-        rt_bg  = "#161b22" if self.is_dark else "#f6f8fa"
-        self.setStyleSheet(f"""
-            QWidget#topBar        {{ background-color: {tb_bg}; border-bottom: 1px solid {border}; }}
-            QWidget#pluginRibbon  {{ background-color: {rb_bg}; border-bottom: 1px solid {border}; }}
-            QWidget#resultToolbar {{ background-color: {rt_bg}; border-bottom: 1px solid {border}; }}
+        if hasattr(self, "theme_btn"):
+            self.theme_btn.setText("☀  Light" if self.is_dark else "🌙  Dark")
+        self.setStyleSheet("""
+            QWidget#topBar       { border-bottom: 1px solid palette(mid); }
+            QWidget#pluginRibbon { border-bottom: 1px solid palette(mid); }
+            QWidget#resultToolbar{ border-bottom: 1px solid palette(mid); }
         """)
+        if hasattr(self, "case_tag"):
+            self._update_case_tag_style()
 
-    def _show_status(self, msg: str):
-        self.status_bar.showMessage(f"  {msg}", 10000)
-
+    def _update_case_tag_style(self):
+        """Call after apply_theme to re-style the inline case tag."""
+        if self.is_dark:
+            self.case_tag.setStyleSheet(
+                "background-color: #31363b; color: #9da5b4; border-radius: 5px;"
+                "padding: 4px 12px; font-size: 12px; font-weight: 600;"
+            )
+        else:
+            self.case_tag.setStyleSheet(
+                "background-color: #e3e5e7; color: #5c6370; border-radius: 5px;"
+                "padding: 4px 12px; font-size: 12px; font-weight: 600;"
+            )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -579,15 +591,11 @@ def _lbl(text, style=""):
 def _stat_card(title, value, icon):
     c = QWidget()
     c.setObjectName("statCard")
-    c.setStyleSheet(
-        "QWidget#statCard { background-color: #161b22; border: 1px solid #30363d;"
-        "border-radius: 8px; padding: 14px 10px; }"
-    )
     cl = QVBoxLayout(c)
     cl.setSpacing(4)
     cl.addWidget(_lbl(icon,  "font-size:22px;background:transparent;"))
-    cl.addWidget(_lbl(value, "font-size:16px;font-weight:700;background:transparent;color:#e6edf3;"))
-    cl.addWidget(_lbl(title, "font-size:10px;color:#8b949e;background:transparent;"))
+    cl.addWidget(_lbl(value, "font-size:16px;font-weight:700;background:transparent;"))
+    cl.addWidget(_lbl(title, "font-size:10px;background:transparent;"))
     return c
 
 
