@@ -1,0 +1,16 @@
+[project]
+name = "dumpscope"
+version = "0.1.0"
+description = "Memory Forensics Application"
+requires-python = ">=3.11"
+dependencies = [
+    "pyqt6>=6.6.0",
+    "volatility3>=2.5.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["ui", "core"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
