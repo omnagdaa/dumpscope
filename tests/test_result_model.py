@@ -1,4 +1,5 @@
 """Typing, sorting, tree depth and filtering in the results model."""
+import os
 from PyQt6.QtCore import Qt
 
 from ui.result_model import ResultFilterProxy, ResultTableModel
@@ -95,3 +96,25 @@ def test_short_rows_are_padded_not_shifted(qapp):
     model.set_columns(["PID", "Name", "Path", "State"])
     model.append_rows([["820", "svchost.exe"]])
     assert model.row_values(0) == ["820", "svchost.exe", "", ""]
+
+
+def test_a_theme_change_does_not_corrupt_the_proxys_index_mapping():
+    """
+    Toggling the theme with results on screen used to kill the process.
+
+    apply_theme emitted a bare layoutChanged. Qt requires that signal to be
+    preceded by layoutAboutToBeChanged; without it QSortFilterProxyModel
+    rebuilds its mapping without saving the indexes the view still holds, and
+    the next mouse move over the table dereferences one of them. It dies in
+    QSortFilterProxyModel::parent with no Python traceback, because no Python
+    frame is on the stack.
+    """
+    import subprocess
+    import sys
+
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_stress.py")
+    proc = subprocess.run([sys.executable, script], capture_output=True,
+                          text=True, timeout=180)
+    assert proc.returncode == 0, (
+        f"the result table crashed (exit {proc.returncode})\n{proc.stderr[-800:]}"
+    )

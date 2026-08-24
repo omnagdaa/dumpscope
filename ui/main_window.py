@@ -6,19 +6,22 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
-from PyQt6.QtGui import QAction, QColor, QDesktopServices
+from PyQt6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
-    QApplication, QColorDialog, QDockWidget, QFileDialog, QFrame, QGridLayout,
+    QApplication, QColorDialog, QDockWidget, QFileDialog, QFontDialog,
+    QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
     QMessageBox,
     QPushButton, QScrollArea, QSplitter, QStatusBar, QTabWidget, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
+from core import settings
 from core.case import Case, remember_case
 from core.database import Database
 from core.plugins import PluginRegistry, build_command_args
@@ -30,10 +33,14 @@ from ui.bookmark_dialog import BookmarkDialog
 from ui.case_tree import CaseTree
 from ui.tag_panel import TagPanel
 from ui.plugin_args_dialog import PluginArgsDialog
+from ui.notifications import Notifier
 from ui.plugin_ribbon import PluginRibbon
 from ui.result_panel import ResultPanel
 from ui import icons
-from ui.theme import build as build_theme, palette, restyle
+from ui.theme import (
+    BASE_FONT_SIZE, build as build_theme, fonts as theme_fonts, palette, restyle,
+    set_fonts,
+)
 
 log = logging.getLogger("dumpscope.main_window")
 
@@ -66,9 +73,18 @@ class MainWindow(QMainWindow):
         self.profile = ImageProfile()
 
         self._runners: dict[str, VolatilityRunner] = {}
+        self._run_started: dict[str, float] = {}
+        # The high-water mark of concurrent runs, so a finished batch can
+        # report on itself and then reset.
+        self._batch_size = 0
         self._panels: dict[str, ResultPanel] = {}
         self._os_probe: ImageProbe | None = None
         self.active_source_id: int | None = None
+
+        self.settings = settings.load()
+        set_fonts(self.settings.get("ui_font", ""),
+                  self.settings.get("mono_font", ""),
+                  int(self.settings.get("font_size") or BASE_FONT_SIZE))
 
         self.db = self._open_case_database()
         self._ensure_case_directories()
@@ -183,6 +199,11 @@ class MainWindow(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+
+        self.notifier = Notifier(
+            self, desktop=bool(self.settings.get("desktop_notifications", True)),
+        )
+        self.notifier.set_dark(self.is_dark)
 
     def _build_case_dock(self):
         """
@@ -355,6 +376,10 @@ class MainWindow(QMainWindow):
             self._refresh_evidence()
         self._refresh_case_tree()
         self._show_status(f"Hashed — MD5 {md5[:16]}…")
+        self.notifier.notify(
+            "Hashing finished", f"MD5 {md5[:16]}…  ·  SHA-256 {sha256[:16]}…",
+            "success",
+        )
 
     # ── Stored results and bookmarks ──────────────────────────────────────────
 
@@ -461,6 +486,27 @@ class MainWindow(QMainWindow):
         search_action.setShortcut("Ctrl+P")
         search_action.triggered.connect(lambda: self.ribbon.focus_search())
         view_menu.addAction(search_action)
+
+        view_menu.addSeparator()
+        font_action = QAction("Interface Font…", self)
+        font_action.triggered.connect(self._choose_ui_font)
+        view_menu.addAction(font_action)
+
+        mono_action = QAction("Monospace Font…", self)
+        mono_action.triggered.connect(self._choose_mono_font)
+        view_menu.addAction(mono_action)
+
+        reset_fonts = QAction("Reset Fonts", self)
+        reset_fonts.triggered.connect(self._reset_fonts)
+        view_menu.addAction(reset_fonts)
+
+        self.notify_action = QAction("Desktop Notifications", self)
+        self.notify_action.setCheckable(True)
+        self.notify_action.setChecked(
+            bool(self.settings.get("desktop_notifications", True)))
+        self.notify_action.toggled.connect(self._set_desktop_notifications)
+        view_menu.addAction(self.notify_action)
+        view_menu.addSeparator()
 
         identify_action = QAction("Re-identify Image", self)
         identify_action.triggered.connect(self._start_os_probe)
@@ -994,6 +1040,8 @@ class MainWindow(QMainWindow):
         # otherwise pile up for the life of the session, one per run.
         runner.finished.connect(runner.deleteLater)
         self._runners[run_key] = runner
+        self._batch_size = max(self._batch_size, len(self._runners))
+        self._run_started[run_key] = time.monotonic()
         runner.start()
 
     def _cancel_run(self, plugin_id: str):
@@ -1025,18 +1073,56 @@ class MainWindow(QMainWindow):
         self._refresh_case_tree()
 
         rows = panel.model.rowCount() if panel else 0
-        if is_extraction and exit_code == 0 and not cancelled:
-            self._show_status(
-                f"Extraction finished — {rows} file(s) written to {self.dumps_dir}"
-            )
-            return
         short = plugin_id.rsplit(".", 1)[-1]
+        elapsed = self._elapsed(run_key)
+
+        if is_extraction and exit_code == 0 and not cancelled:
+            message = f"{rows} file(s) written to {self.dumps_dir}"
+            self._show_status(f"Extraction finished — {message}")
+            self.notifier.notify("Extraction finished", message, "success")
+            self._announce_idle()
+            return
+
         if cancelled:
             self._show_status(f"{short} cancelled.")
         elif exit_code == 0:
             self._show_status(f"{short} finished — {rows:,} rows.")
+            self.notifier.notify(
+                f"{short} finished", f"{rows:,} rows{elapsed}", "success")
         else:
             self._show_status(f"{short} failed (exit {exit_code}). See the Log tab.")
+            self.notifier.notify(
+                f"{short} failed",
+                f"Exit code {exit_code}{elapsed} — see the Log tab.", "error",
+            )
+        self._announce_idle()
+
+    def _elapsed(self, run_key: str) -> str:
+        """" — 1m 12s", or nothing if the run was never timed."""
+        started = self._run_started.pop(run_key, None)
+        if started is None:
+            return ""
+        seconds = int(time.monotonic() - started)
+        if seconds < 60:
+            return f" in {seconds}s"
+        return f" in {seconds // 60}m {seconds % 60:02d}s"
+
+    def _announce_idle(self):
+        """
+        Report the batch, once, when the last run of it finishes.
+
+        An examiner who queues six plugins wants to know when the *set* is
+        done; six separate "finished" messages do not answer that question,
+        and the sixth overwrites the answer in the status bar.
+        """
+        if self._runners or self._batch_size < 2:
+            return
+        total = sum(panel.model.rowCount() for panel in self._result_panels())
+        self.notifier.notify(
+            f"All {self._batch_size} plugins finished",
+            f"{total:,} rows across {self._batch_size} runs.", "success",
+        )
+        self._batch_size = 0
 
     def _focus_panel(self, plugin_id: str):
         panel = self._panels.get(plugin_id)
@@ -1490,6 +1576,8 @@ class MainWindow(QMainWindow):
         icons.clear_cache()
         self._update_os_badge()
         self.ribbon.set_dark(self.is_dark)
+        if getattr(self, "notifier", None) is not None:
+            self.notifier.set_dark(self.is_dark)
         self.ribbon.repaint_glyphs()
         if getattr(self, "case_tree", None) is not None:
             self.case_tree.apply_theme(self.is_dark)
@@ -1502,6 +1590,58 @@ class MainWindow(QMainWindow):
                 widget.apply_theme(self.is_dark)
         self.case.is_dark = self.is_dark
         self.case.save()
+
+    # ── Fonts ─────────────────────────────────────────────────────────────────
+
+    def _choose_ui_font(self):
+        """
+        Pick the interface font. The size chosen scales the whole sheet.
+
+        Every size in the stylesheet is written against one base, so a choice
+        of 15pt moves headings, labels and table text together instead of
+        leaving a 15pt body under an 11pt heading.
+        """
+        current = theme_fonts()
+        seed = QFont(current["ui_font"] or self.font().family(), current["size"])
+        chosen, accepted = QFontDialog.getFont(seed, self, "Interface Font")
+        if not accepted:
+            return
+        self._save_fonts(ui_font=chosen.family(),
+                         font_size=chosen.pointSize() or current["size"])
+        self.notifier.notify(
+            "Interface font changed",
+            f"{chosen.family()} at {chosen.pointSize()}pt", "info",
+        )
+
+    def _choose_mono_font(self):
+        """Pick the fixed-width font used for offsets, hex and the log."""
+        current = theme_fonts()
+        seed = QFont(current["mono_font"] or "JetBrains Mono", current["size"])
+        seed.setStyleHint(QFont.StyleHint.Monospace)
+        chosen, accepted = QFontDialog.getFont(seed, self, "Monospace Font")
+        if not accepted:
+            return
+        self._save_fonts(mono_font=chosen.family())
+        self.notifier.notify("Monospace font changed", chosen.family(), "info")
+
+    def _reset_fonts(self):
+        self._save_fonts(ui_font="", mono_font="", font_size=BASE_FONT_SIZE)
+        self._show_status("Fonts reset to the defaults.")
+
+    def _save_fonts(self, **changes):
+        self.settings = settings.save(**changes)
+        set_fonts(self.settings.get("ui_font", ""),
+                  self.settings.get("mono_font", ""),
+                  int(self.settings.get("font_size") or BASE_FONT_SIZE))
+        self.apply_theme()
+
+    def _set_desktop_notifications(self, enabled: bool):
+        self.settings = settings.save(desktop_notifications=bool(enabled))
+        self.notifier.set_desktop_enabled(bool(enabled))
+        self._show_status(
+            "Desktop notifications on." if enabled else
+            "Desktop notifications off — messages still appear in the window."
+        )
 
     # ── Command palette ───────────────────────────────────────────────────────
 
@@ -1553,6 +1693,14 @@ class MainWindow(QMainWindow):
             Command("Refresh Plugin List", self._refresh_registry, group="Tools",
                     glyph="shuffle", keywords="reload volatility introspect"),
             Command("New Tag…", self._new_tag, group="Tags", glyph="tag"),
+            Command("Interface Font…", self._choose_ui_font, group="View",
+                    glyph="news", keywords="typeface family size scale bigger"),
+            Command("Monospace Font…", self._choose_mono_font, group="View",
+                    glyph="terminal", keywords="fixed width hex offsets code"),
+            Command("Reset Fonts", self._reset_fonts, group="View", glyph="news"),
+            Command("Toggle Desktop Notifications",
+                    lambda: self.notify_action.toggle(), group="View",
+                    glyph="signal", keywords="alerts toast tray popup"),
         ]
         for os_name, (glyph, label) in OS_BADGES.items():
             commands.append(Command(
@@ -1579,9 +1727,18 @@ class MainWindow(QMainWindow):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.case.directory))
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Toasts are children positioned by hand, so they have to be moved back
+        # into the corner when the corner moves.
+        if getattr(self, "notifier", None) is not None:
+            self.notifier.handle_resize()
+
     # ── Shutdown ──────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        if getattr(self, "notifier", None) is not None:
+            self.notifier.shutdown()
         if self._os_probe is not None:
             self._os_probe.cancel()
             self._os_probe.wait(2000)

@@ -28,7 +28,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QColor, QFont
 
-from ui.theme import palette
+from ui.theme import mono_family, palette
 
 TREE_DEPTH_COLUMN = "TreeDepth"
 
@@ -55,12 +55,21 @@ def _parse_datetime(text: str):
         return None
 
 
+def _mono_font() -> QFont:
+    """The fixed-width font for address columns, following the examiner's choice."""
+    font = QFont()
+    font.setStyleHint(QFont.StyleHint.Monospace)
+    font.setFamily(mono_family())
+    return font
+
+
 class ResultTableModel(QAbstractTableModel):
     """Streaming-friendly model: rows are appended in batches as vol3 emits them."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._faint = QColor(palette(dark=True)["text_faint"])
+        self._mono = _mono_font()
         self._columns: list[str] = []
         self._rows: list[list[str]] = []
         self._depths: list[int] = []
@@ -195,12 +204,10 @@ class ResultTableModel(QAbstractTableModel):
             return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         if role == Qt.ItemDataRole.FontRole:
-            if self._types[col] == TYPE_HEX:
-                font = QFont()
-                font.setStyleHint(QFont.StyleHint.Monospace)
-                font.setFamily("JetBrains Mono")
-                return font
-            return None
+            # Built once. data() is called for every visible cell on every
+            # repaint, and constructing a QFont each time showed up as a
+            # measurable cost on wide tables.
+            return self._mono if self._types[col] == TYPE_HEX else None
 
         if role == Qt.ItemDataRole.ForegroundRole:
             # Blank and N/A cells are dimmed so a sparse column reads as sparse
@@ -213,9 +220,27 @@ class ResultTableModel(QAbstractTableModel):
         return None
 
     def apply_theme(self, dark: bool):
-        """Follow the palette for the colours Qt paints with a brush."""
+        """
+        Follow the palette for the colours Qt paints with a brush.
+
+        This announces a data change, not a layout change. A bare
+        ``layoutChanged`` — without the ``layoutAboutToBeChanged`` that Qt
+        requires to be paired with it — leaves QSortFilterProxyModel rebuilding
+        its index mapping without having saved the old one, so every index the
+        view is still holding points into freed memory. The next mouse move
+        over the table dereferences one and the process dies in
+        QSortFilterProxyModel::parent, with no Python traceback because no
+        Python frame is involved.
+        """
         self._faint = QColor(palette(dark=dark)["text_faint"])
-        self.layoutChanged.emit()
+        self._mono = _mono_font()
+        if not self._rows or not self._columns:
+            return
+        self.dataChanged.emit(
+            self.index(0, 0),
+            self.index(len(self._rows) - 1, len(self._columns) - 1),
+            [Qt.ItemDataRole.ForegroundRole],
+        )
 
     # ── Sorting ───────────────────────────────────────────────────────────────
 

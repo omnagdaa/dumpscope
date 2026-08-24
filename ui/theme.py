@@ -20,6 +20,7 @@ so an inline colour is a permanent theme override that no palette can reach.
 
 from __future__ import annotations
 
+import re
 from string import Template
 
 # ── Palettes ──────────────────────────────────────────────────────────────────
@@ -88,6 +89,17 @@ _FONTS = {
     "ui_font":   "'Inter', 'Segoe UI', 'Ubuntu', 'Cantarell', sans-serif",
     "mono_font": "'JetBrains Mono', 'Cascadia Mono', 'Consolas', 'DejaVu Sans Mono', monospace",
 }
+
+# The examiner's choices, if any. A chosen family is put in front of the stack
+# rather than replacing it, so a name that is not actually installed degrades to
+# the same fallbacks as before instead of to whatever Qt picks by default.
+_OVERRIDES = {"ui_font": "", "mono_font": "", "scale": 1.0}
+
+# Every size in the sheet is written against this base, so scaling all of them
+# by (chosen size / BASE_FONT_SIZE) keeps the proportions the design has.
+BASE_FONT_SIZE = 13
+_SIZE_RE = re.compile(r"font-size:\s*(\d+)px")
+MIN_FONT_SIZE = 7
 
 
 # ── Template ──────────────────────────────────────────────────────────────────
@@ -427,6 +439,27 @@ QLabel#osBadge[probing="true"] {
     color: $text_faint;
 }
 
+/* ── Toasts ────────────────────────────────────────────────────────────── */
+/* A status bar holds one message, so six plugins finishing overwrite each
+   other and none of them is visible from another window. */
+QWidget#toast {
+    background-color: $surface_high;
+    border: 1px solid $border;
+    border-left: 3px solid $accent;
+    border-radius: 6px;
+}
+QWidget#toast[level="success"] { border-left-color: $ok; }
+QWidget#toast[level="warning"] { border-left-color: $warn; }
+QWidget#toast[level="error"]   { border-left-color: $danger; }
+QLabel#toastTitle {
+    font-size: 12px;
+    font-weight: 700;
+    color: $text;
+    background: transparent;
+}
+QLabel#toastBody { font-size: 11px; color: $text_dim; background: transparent; }
+QLabel#toastGlyph { background: transparent; }
+
 /* ── Command palette ───────────────────────────────────────────────────── */
 QDialog#commandPalette {
     background-color: $surface;
@@ -625,10 +658,54 @@ QLabel#dropFile { font-size: 12px; font-weight: 700; color: $ok; }
 """)
 
 
+def set_fonts(ui_font: str = "", mono_font: str = "", size: int = BASE_FONT_SIZE):
+    """
+    Choose the interface fonts. Empty names keep the built-in stacks.
+
+    Applies to the next `build`; callers restyle the application themselves,
+    since a font change is a full re-render either way.
+    """
+    _OVERRIDES["ui_font"] = (ui_font or "").strip()
+    _OVERRIDES["mono_font"] = (mono_font or "").strip()
+    _OVERRIDES["scale"] = max(0.6, min(2.5, (size or BASE_FONT_SIZE) / BASE_FONT_SIZE))
+
+
+def fonts() -> dict:
+    """The current choices: family names (possibly empty) and the base size."""
+    return {
+        "ui_font": _OVERRIDES["ui_font"],
+        "mono_font": _OVERRIDES["mono_font"],
+        "size": round(BASE_FONT_SIZE * _OVERRIDES["scale"]),
+    }
+
+
+def mono_family() -> str:
+    """The monospace family to hand a QFont, for the places QSS cannot reach."""
+    return _OVERRIDES["mono_font"] or "JetBrains Mono"
+
+
+def _stack(key: str) -> str:
+    chosen = _OVERRIDES[key]
+    return f"'{chosen}', {_FONTS[key]}" if chosen else _FONTS[key]
+
+
+def _scale_sizes(sheet: str) -> str:
+    scale = _OVERRIDES["scale"]
+    if scale == 1.0:
+        return sheet
+    return _SIZE_RE.sub(
+        lambda m: f"font-size: {max(MIN_FONT_SIZE, round(int(m.group(1)) * scale))}px",
+        sheet,
+    )
+
+
 def build(dark: bool = True) -> str:
     """Render the stylesheet for one of the two palettes."""
-    tokens = dict(DARK if dark else LIGHT, **_FONTS)
-    return _QSS.substitute(tokens)
+    tokens = dict(
+        DARK if dark else LIGHT,
+        ui_font=_stack("ui_font"), mono_font=_stack("mono_font"),
+    )
+    return _scale_sizes(_QSS.substitute(tokens))
 
 
 def palette(dark: bool = True) -> dict:
