@@ -87,3 +87,56 @@ def test_case_tree_constructs(qapp):
         [], [],
     )
     tree.deleteLater()
+
+
+def test_sorting_starts_disabled_and_enables_on_a_header_click(qapp):
+    """
+    Regression for a SIGSEGV.
+
+    Sorting used to be enabled up front with the indicator hidden, and a slot
+    on sortIndicatorChanged called setSortIndicatorShown straight back into the
+    header. Qt emits that signal from inside QHeaderView::mouseReleaseEvent, so
+    the slot re-entered the header's own mouse handling and the application
+    crashed with no Python traceback. The switch is now driven by
+    sectionClicked and deferred to the next event-loop pass.
+    """
+    from PyQt6.QtWidgets import QApplication
+    from ui.result_panel import ResultPanel
+
+    panel = ResultPanel("PsTree", "windows.pstree.PsTree")
+    panel.set_columns(["PID", "ImageFileName"])
+    panel.append_rows([["4", "System"], ["372", "smss.exe"], ["88", "Registry"]])
+
+    header = panel.table.horizontalHeader()
+    assert not panel.table.isSortingEnabled(), "source order must survive until asked"
+    assert not header.isSortIndicatorShown()
+    # vol3's emitted order carries meaning for pstree; it must be intact.
+    assert [panel.model.row_values(r)[0] for r in range(3)] == ["4", "372", "88"]
+
+    header.sectionClicked.emit(0)
+    assert panel._sorting_enabled, "the click is recorded immediately…"
+    assert not panel.table.isSortingEnabled(), "…but the header is not touched yet"
+
+    QApplication.processEvents()          # let the deferred switch run
+    assert panel.table.isSortingEnabled()
+    assert header.isSortIndicatorShown()
+    panel.deleteLater()
+
+
+def test_a_second_header_click_does_not_re_enter(qapp):
+    from PyQt6.QtWidgets import QApplication
+    from ui.result_panel import ResultPanel
+
+    panel = ResultPanel("PsList", "windows.pslist.PsList")
+    panel.set_columns(["PID"])
+    panel.append_rows([["4"], ["372"]])
+    header = panel.table.horizontalHeader()
+    header.sectionClicked.emit(0)
+    QApplication.processEvents()
+    # Once Qt owns the sorting, our slot must do nothing at all.
+    enabled_before = panel.table.isSortingEnabled()
+    header.sectionClicked.emit(0)
+    header.sectionClicked.emit(0)
+    QApplication.processEvents()
+    assert panel.table.isSortingEnabled() == enabled_before
+    panel.deleteLater()

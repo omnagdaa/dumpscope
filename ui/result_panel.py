@@ -8,7 +8,7 @@ import csv
 import json
 import os
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QKeySequence
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout,
@@ -54,6 +54,7 @@ class ResultPanel(QWidget):
         self.plugin_id = plugin_id
         self._running = False
         self._log_lines: list[str] = []
+        self._sorting_enabled = False
 
         self.model = ResultTableModel(self)
         self.proxy = ResultFilterProxy(self)
@@ -152,7 +153,8 @@ class ResultPanel(QWidget):
     def _build_table(self) -> QTableView:
         self.table = QTableView()
         self.table.setModel(self.proxy)
-        self.table.setSortingEnabled(True)
+        # Sorting starts off; see _on_header_clicked.
+        self.table.setSortingEnabled(False)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
@@ -167,21 +169,44 @@ class ResultPanel(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
         header.setHighlightSections(False)
-        # Enabling sorting makes the view sort by section 0 straight away, which
-        # scrambles output whose emitted order carries meaning — pstree's parent
-        # and child rows are only adjacent in vol3's own ordering. Clearing the
-        # indicator leaves rows in source order until a header is actually clicked.
-        header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        header.setSectionsClickable(True)
         header.setSortIndicatorShown(False)
-        header.sortIndicatorChanged.connect(
-            lambda *_: header.setSortIndicatorShown(True)
-        )
+        header.sectionClicked.connect(self._on_header_clicked)
 
         copy_action = QAction(self.table)
         copy_action.setShortcut(QKeySequence.StandardKey.Copy)
         copy_action.triggered.connect(self.copy_selection)
         self.table.addAction(copy_action)
         return self.table
+
+    def _on_header_clicked(self, section: int):
+        """
+        Turn sorting on the first time a header is clicked, and not before.
+
+        Two reasons it starts off. Enabling sorting immediately makes the view
+        sort by column 0 straight away, which scrambles output whose emitted
+        order carries meaning — pstree's parents and children are only adjacent
+        in vol3's own ordering. And while a plugin is still streaming, a sorted
+        proxy re-sorts on every batch, which on a plugin emitting six figures
+        of rows costs far more than the sort is worth.
+
+        The switch is deferred to the next event-loop pass. This signal is
+        emitted from inside QHeaderView::mouseReleaseEvent, and changing the
+        header's sort state from within its own mouse handler re-enters Qt's
+        header code; doing exactly that segfaulted the application (the earlier
+        version of this hooked sortIndicatorChanged and called
+        setSortIndicatorShown straight back into it).
+        """
+        if self._sorting_enabled:
+            return
+        self._sorting_enabled = True
+        QTimer.singleShot(0, lambda: self._enable_sorting(section))
+
+    def _enable_sorting(self, section: int):
+        header = self.table.horizontalHeader()
+        header.setSortIndicatorShown(True)
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(section, Qt.SortOrder.AscendingOrder)
 
     def _build_log(self) -> QPlainTextEdit:
         mono = QFont()
