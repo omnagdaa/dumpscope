@@ -221,6 +221,11 @@ class PluginRibbon(QWidget):
 
     # ── Density and state ─────────────────────────────────────────────────────
 
+    def repaint_glyphs(self):
+        """Re-render every tile's glyph, after a palette change."""
+        for button in self._buttons.values():
+            button._paint_glyph()
+
     def set_compact(self, compact: bool):
         if compact == self._compact:
             return

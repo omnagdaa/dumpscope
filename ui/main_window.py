@@ -10,12 +10,13 @@ import os
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
-from PyQt6.QtGui import QAction, QDesktopServices
+from PyQt6.QtGui import QAction, QColor, QDesktopServices, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QDockWidget, QFileDialog, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QPushButton, QScrollArea, QStatusBar, QTabWidget, QTextEdit, QVBoxLayout,
-    QWidget,
+    QApplication, QColorDialog, QDockWidget, QFileDialog, QFrame, QGridLayout,
+    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
+    QMessageBox,
+    QPushButton, QScrollArea, QSplitter, QStatusBar, QTabWidget, QTextEdit,
+    QVBoxLayout, QWidget,
 )
 
 from core.case import Case, remember_case
@@ -27,19 +28,21 @@ from core.hash_worker import HashWorker
 from core.report import write_report
 from ui.bookmark_dialog import BookmarkDialog
 from ui.case_tree import CaseTree
+from ui.tag_panel import TagPanel
 from ui.plugin_args_dialog import PluginArgsDialog
 from ui.plugin_ribbon import PluginRibbon
 from ui.result_panel import ResultPanel
-from ui.theme import build as build_theme, restyle
+from ui import icons
+from ui.theme import build as build_theme, palette, restyle
 
 log = logging.getLogger("dumpscope.main_window")
 
-# Icon and display name only. The badge's colours are chosen by the stylesheet
+# Glyph name and display name. The badge's colours are chosen by the stylesheet
 # from its `os` property, so a theme change repaints it like everything else.
 OS_BADGES = {
-    "windows": ("🪟", "Windows"),
-    "linux":   ("🐧", "Linux"),
-    "mac":     ("🍎", "macOS"),
+    "windows": ("window",  "Windows"),
+    "linux":   ("penguin", "Linux"),
+    "mac":     ("apple",   "macOS"),
 }
 DEFAULT_OS = "windows"
 
@@ -135,6 +138,12 @@ class MainWindow(QMainWindow):
         )
 
     @property
+    def dumps_dir(self) -> str:
+        """Where extractions land. Empty in Quick Analysis, which has no case."""
+        base = self.case.directory
+        return os.path.join(base, "dumps") if base else ""
+
+    @property
     def symbol_dirs(self) -> list[str]:
         base = self.case.directory
         return [os.path.join(base, "symbols")] if base else []
@@ -165,7 +174,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
         self.tabs.tabCloseRequested.connect(self._close_tab)
-        self.tabs.addTab(self._build_overview_tab(), "Overview")
+        self.tabs.addTab(self._build_overview_tab(), "Case")
         self._refresh_image_facts()
         self.tabs.tabBar().setTabButton(0, self.tabs.tabBar().ButtonPosition.RightSide, None)
         root.addWidget(self.tabs, 1)
@@ -192,9 +201,28 @@ class MainWindow(QMainWindow):
         self.case_tree.bookmark_activated.connect(self._show_bookmark)
         self.case_tree.bookmark_deleted.connect(self._delete_bookmark)
 
+        self.tag_panel = TagPanel()
+        self.tag_panel.tag_created.connect(self._new_tag)
+        self.tag_panel.tag_renamed.connect(self._rename_tag)
+        self.tag_panel.tag_recoloured.connect(self._recolour_tag)
+        self.tag_panel.tag_deleted.connect(self._delete_tag)
+        self.tag_panel.finding_activated.connect(self._goto_finding)
+        self.tag_panel.finding_deleted.connect(self._delete_bookmark)
+        self.tag_panel.finding_untagged.connect(self._untag_finding)
+
+        # The case explorer and the tag index are both navigation, so they share
+        # one dock; the splitter lets an examiner give whichever they are living
+        # in the room, instead of the layout deciding for them.
+        explorer = QSplitter(Qt.Orientation.Vertical)
+        explorer.addWidget(self.case_tree)
+        explorer.addWidget(self.tag_panel)
+        explorer.setStretchFactor(0, 3)
+        explorer.setStretchFactor(1, 2)
+        explorer.setChildrenCollapsible(False)
+
         dock = QDockWidget("Case", self)
         dock.setObjectName("caseDock")
-        dock.setWidget(self.case_tree)
+        dock.setWidget(explorer)
         dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
@@ -211,14 +239,30 @@ class MainWindow(QMainWindow):
         if getattr(self, "case_tree", None) is None or self.db is None:
             return
         try:
+            bookmarks = self.db.get_bookmarks()
+            tags = self.db.get_tags()
             self.case_tree.refresh(
                 self.db.get_data_sources(),
                 self.db.get_results(),
-                self.db.get_bookmarks(),
+                bookmarks,
                 active_source_id=self.active_source_id,
             )
+            self.tag_panel.refresh(tags, bookmarks)
+            for panel in self._result_panels():
+                panel.set_tags(tags)
         except Exception as exc:
             log.warning("Could not refresh the case tree: %s", exc)
+
+    def _result_panels(self) -> list[ResultPanel]:
+        """Every open results tab. Empty before the tab bar exists — the case
+        dock is built first and refreshes itself on the way up."""
+        tabs = getattr(self, "tabs", None)
+        if tabs is None:
+            return []
+        return [
+            tabs.widget(i) for i in range(tabs.count())
+            if isinstance(tabs.widget(i), ResultPanel)
+        ]
 
     # ── Data sources ──────────────────────────────────────────────────────────
 
@@ -233,6 +277,7 @@ class MainWindow(QMainWindow):
         self.case.image_path = path
         self.case.save()
         self._set_image_label(path)
+        self._refresh_evidence()
         self._refresh_case_tree()
         self._show_status(f"Active data source: {os.path.basename(path)}")
         self._start_os_probe()
@@ -289,10 +334,7 @@ class MainWindow(QMainWindow):
         if source_id == self.active_source_id:
             self.case.md5, self.case.sha256 = md5, sha256
             self.case.save()
-            for key, value in (("md5", md5), ("sha256", sha256)):
-                field = getattr(self, "hash_fields", {}).get(key)
-                if field is not None:
-                    field.setText(value or "—")
+            self._refresh_evidence()
         self._refresh_case_tree()
         self._show_status(f"Hashed — MD5 {md5[:16]}…")
 
@@ -309,7 +351,7 @@ class MainWindow(QMainWindow):
         plugin = stored["plugin"]
         short = plugin.rsplit(".", 1)[-1]
         panel = ResultPanel(short, plugin)
-        panel.bookmark_requested.connect(self._save_bookmark)
+        self._wire_panel(panel)
         panel.set_columns(stored["columns"])
         panel.append_rows(stored["rows"])
         panel.set_finished(0)
@@ -454,6 +496,8 @@ class MainWindow(QMainWindow):
         self.image_lbl.setProperty("loaded", "false")
         self._set_image_label(image_path)
 
+        self.os_glyph = QLabel()
+        self.os_glyph.setObjectName("osGlyph")
         self.os_badge = QLabel()
         self.os_badge.setObjectName("osBadge")
 
@@ -469,6 +513,7 @@ class MainWindow(QMainWindow):
         row.addWidget(separator)
         row.addWidget(self.case_tag)
         row.addWidget(self.image_lbl)
+        row.addWidget(self.os_glyph)
         row.addWidget(self.os_badge)
         row.addStretch()
         row.addWidget(symbols_btn)
@@ -478,40 +523,25 @@ class MainWindow(QMainWindow):
         return bar
 
     def _build_overview_tab(self) -> QWidget:
+        """
+        The Case tab: the case's own details, the evidence, and what the probe
+        made of it — editable in place.
+
+        Collecting these in a wizard before the case opened meant describing an
+        image nobody had looked at yet, in a window that then went away. They
+        belong here, beside the evidence they describe, editable at any point in
+        the investigation.
+        """
         area = QScrollArea()
         area.setWidgetResizable(True)
         inner = QWidget()
         layout = QVBoxLayout(inner)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(18)
+        layout.setContentsMargins(22, 18, 22, 18)
+        layout.setSpacing(14)
 
-        title = QLabel(f"Case: {self.case.case_name}")
-        title.setObjectName("overviewTitle")
-        layout.addWidget(title)
+        layout.addWidget(self._build_case_details())
+        layout.addWidget(self._build_evidence_group())
 
-        blurb = QLabel(
-            "Use File → Open Image to load a memory dump, then choose a plugin."
-            if self.case.quick_mode else
-            "Select an analysis module from the ribbon above. Each plugin runs "
-            "volatility3 in its own process and streams results into a tab."
-        )
-        blurb.setWordWrap(True)
-        blurb.setObjectName("overviewBlurb")
-        layout.addWidget(blurb)
-
-        summary = QGroupBox("Case Summary")
-        grid = QGridLayout(summary)
-        grid.setSpacing(12)
-        self.stat_size = _stat_card("Image Size", _format_size(self.case.image_path))
-        self.stat_plugins = _stat_card("Plugins Available", "—")
-        grid.addWidget(self.stat_size, 0, 0)
-        grid.addWidget(_stat_card("Case Number", self.case.case_number or "—"), 0, 1)
-        grid.addWidget(_stat_card("Examiner", self.case.examiner_name or "—"), 0, 2)
-        grid.addWidget(self.stat_plugins, 0, 3)
-        layout.addWidget(summary)
-
-        # What the probe worked out about the image. Populated by
-        # _refresh_image_facts once identification finishes.
         self.profile_group = QGroupBox("Image Profile")
         self.profile_grid = QGridLayout(self.profile_group)
         self.profile_grid.setSpacing(8)
@@ -519,33 +549,171 @@ class MainWindow(QMainWindow):
         self.profile_grid.setColumnStretch(3, 1)
         layout.addWidget(self.profile_group)
 
-        integrity = QGroupBox("Image Integrity")
-        integrity_grid = QGridLayout(integrity)
-        integrity_grid.setSpacing(10)
-        integrity_grid.setColumnStretch(1, 1)
-        self.hash_fields = {}
-        for row_index, (label, key) in enumerate((("MD5", "md5"), ("SHA-256", "sha256"))):
-            name = QLabel(label)
-            name.setFixedWidth(70)
-            value = QLineEdit(getattr(self.case, key, "") or "—")
-            value.setReadOnly(True)
-            self.hash_fields[key] = value
-            integrity_grid.addWidget(name, row_index, 0)
-            integrity_grid.addWidget(value, row_index, 1)
-        layout.addWidget(integrity)
-
-        if self.case.notes:
-            notes_group = QGroupBox("Case Notes")
-            notes_layout = QVBoxLayout(notes_group)
-            notes = QTextEdit(self.case.notes)
-            notes.setReadOnly(True)
-            notes.setMaximumHeight(110)
-            notes_layout.addWidget(notes)
-            layout.addWidget(notes_group)
-
         layout.addStretch()
         area.setWidget(inner)
         return area
+
+    def _build_case_details(self) -> QWidget:
+        group = QGroupBox("Case Details")
+        grid = QGridLayout(group)
+        grid.setSpacing(8)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+
+        self.case_fields: dict[str, QLineEdit] = {}
+        editable = (
+            ("case_name",     "Case Name",   "A short name for the investigation"),
+            ("case_number",   "Case Number", "Your reference, e.g. INC-2026-014"),
+            ("examiner_name", "Examiner",    "Who is doing the work"),
+            ("examiner_id",   "Examiner ID", "Badge or staff number"),
+            ("organization",  "Organisation", ""),
+            ("examiner_email", "Email",      ""),
+        )
+        for index, (attr, label, hint) in enumerate(editable):
+            row, column = divmod(index, 2)
+            name = QLabel(label)
+            name.setObjectName("fieldLabel")
+            field = QLineEdit(str(getattr(self.case, attr, "") or ""))
+            field.setPlaceholderText(hint)
+            field.editingFinished.connect(
+                lambda a=attr, f=field: self._commit_case_field(a, f.text())
+            )
+            self.case_fields[attr] = field
+            grid.addWidget(name, row, column * 2)
+            grid.addWidget(field, row, column * 2 + 1)
+
+        row = len(editable) // 2
+        notes_label = QLabel("Notes")
+        notes_label.setObjectName("fieldLabel")
+        self.notes_edit = QTextEdit(self.case.notes or "")
+        self.notes_edit.setPlaceholderText("Scope, authorisation, working hypotheses…")
+        self.notes_edit.setFixedHeight(72)
+        # A QTextEdit has no editingFinished; commit when focus leaves it.
+        self.notes_edit.focusOutEvent = self._wrap_focus_out(self.notes_edit)
+        grid.addWidget(notes_label, row, 0)
+        grid.addWidget(self.notes_edit, row, 1, 1, 3)
+
+        folder_label = QLabel("Folder")
+        folder_label.setObjectName("fieldLabel")
+        folder_row = QHBoxLayout()
+        folder_row.setSpacing(6)
+        self.folder_value = QLabel(self.case.directory or "Quick Analysis — nothing is saved")
+        self.folder_value.setObjectName("fieldHint")
+        self.folder_value.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        reveal = QPushButton("Open Folder")
+        reveal.setFixedHeight(24)
+        reveal.setEnabled(bool(self.case.directory))
+        reveal.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.case.directory))
+        )
+        folder_row.addWidget(self.folder_value, 1)
+        folder_row.addWidget(reveal)
+        grid.addWidget(folder_label, row + 1, 0)
+        grid.addLayout(folder_row, row + 1, 1, 1, 3)
+
+        if self.case.quick_mode:
+            for field in self.case_fields.values():
+                field.setReadOnly(True)
+            self.notes_edit.setReadOnly(True)
+        return group
+
+    def _wrap_focus_out(self, widget):
+        original = type(widget).focusOutEvent
+
+        def handler(event, _widget=widget):
+            original(_widget, event)
+            self._commit_case_field("notes", _widget.toPlainText())
+        return handler
+
+    def _commit_case_field(self, attr: str, value: str):
+        """Write one edited field through to the case file and the database."""
+        value = value.strip()
+        if str(getattr(self.case, attr, "") or "") == value:
+            return
+        if attr == "case_name" and not value:
+            self.case_fields[attr].setText(self.case.case_name)
+            return
+
+        setattr(self.case, attr, value)
+        try:
+            self.case.save()
+        except Exception as exc:
+            log.warning("Could not save the case: %s", exc)
+            self._show_status(f"Could not save: {exc}")
+            return
+
+        if self.db is not None:
+            try:
+                self.db.attach_case(self.case.to_dict())
+                self.db.log_action("case_edited", f"{attr} = {value}",
+                                   self.case.examiner_name)
+            except Exception as exc:
+                log.warning("Could not record the case edit: %s", exc)
+
+        if attr == "case_name":
+            self.case_tag.setText(value)
+            self.setWindowTitle(f"DumpScope — {self.case.display_label}")
+        self._show_status(f"Saved {attr.replace('_', ' ')}.")
+
+    def _build_evidence_group(self) -> QWidget:
+        group = QGroupBox("Evidence")
+        grid = QGridLayout(group)
+        grid.setSpacing(8)
+        grid.setColumnStretch(1, 1)
+
+        image_row = QHBoxLayout()
+        image_row.setSpacing(6)
+        self.evidence_lbl = QLabel()
+        self.evidence_lbl.setObjectName("fieldHint")
+        self.evidence_lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        change_btn = QPushButton("Load Image…")
+        change_btn.setFixedHeight(24)
+        change_btn.clicked.connect(self._open_image_dialog)
+        self.hash_btn = QPushButton("Compute Hashes")
+        self.hash_btn.setFixedHeight(24)
+        self.hash_btn.clicked.connect(self._hash_active_source)
+        image_row.addWidget(self.evidence_lbl, 1)
+        image_row.addWidget(change_btn)
+        image_row.addWidget(self.hash_btn)
+
+        name = QLabel("Image")
+        name.setObjectName("fieldLabel")
+        grid.addWidget(name, 0, 0)
+        grid.addLayout(image_row, 0, 1)
+
+        self.hash_fields: dict[str, QLineEdit] = {}
+        for index, (label, key) in enumerate((("MD5", "md5"), ("SHA-256", "sha256"))):
+            caption = QLabel(label)
+            caption.setObjectName("fieldLabel")
+            value = QLineEdit(getattr(self.case, key, "") or "")
+            value.setPlaceholderText("not computed")
+            value.setReadOnly(True)
+            self.hash_fields[key] = value
+            grid.addWidget(caption, index + 1, 0)
+            grid.addWidget(value, index + 1, 1)
+
+        self._refresh_evidence()
+        return group
+
+    def _refresh_evidence(self):
+        path = self.case.image_path
+        if not path:
+            self.evidence_lbl.setText("No image loaded")
+        else:
+            self.evidence_lbl.setText(f"{path}    ·    {_format_size(path)}")
+        self.hash_btn.setEnabled(bool(path) and os.path.exists(path))
+        for key, field in getattr(self, "hash_fields", {}).items():
+            field.setText(getattr(self.case, key, "") or "")
+
+    def _hash_active_source(self):
+        if self.active_source_id is None or not self.case.image_path:
+            self._show_status("Load an image first.")
+            return
+        self._hash_source(self.active_source_id, self.case.image_path)
 
     def _refresh_image_facts(self):
         """
@@ -593,12 +761,7 @@ class MainWindow(QMainWindow):
             grid.addWidget(name, row, column * 2)
             grid.addWidget(field, row, column * 2 + 1)
 
-        self.stat_plugins.findChild(QLabel, "statValue").setText(
-            str(self.ribbon.plugin_count())
-        )
-        self.stat_size.findChild(QLabel, "statValue").setText(
-            _format_size(self.case.image_path)
-        )
+        self._refresh_evidence()
 
     # ── OS handling ───────────────────────────────────────────────────────────
 
@@ -686,7 +849,8 @@ class MainWindow(QMainWindow):
         )
 
     def _set_badge_probing(self):
-        self.os_badge.setText("⏳  Identifying…")
+        self.os_badge.setText("Identifying…")
+        self.os_badge.setPixmap(QPixmap())
         self.os_badge.setProperty("os", "")
         self.os_badge.setProperty("probing", "true")
         restyle(self.os_badge)
@@ -695,13 +859,22 @@ class MainWindow(QMainWindow):
         if not self.current_os:
             self._set_badge_probing()
             return
-        icon, label = OS_BADGES[self.current_os]
+        glyph, label = OS_BADGES[self.current_os]
         suffix = "?" if self.profile.confidence == "assumed" else ""
-        self.os_badge.setText(f"{icon}  {label}{suffix}")
+        self.os_badge.setText(f"{label}{suffix}")
         self.os_badge.setToolTip(self.profile.summary() or f"{label} plugins")
         self.os_badge.setProperty("os", self.current_os)
         self.os_badge.setProperty("probing", "false")
         restyle(self.os_badge)
+        # The badge's own colour comes from the stylesheet, so the glyph beside
+        # it has to be re-inked from the palette by hand.
+        tokens = palette(dark=self.is_dark)
+        self.os_glyph.setPixmap(icons.pixmap(
+            glyph, size=14,
+            color={"windows": tokens["accent"], "linux": tokens["ok"],
+                   "mac": tokens["warn"]}[self.current_os],
+            ratio=self.devicePixelRatioF() or 1.0,
+        ))
 
     # ── Plugin execution ──────────────────────────────────────────────────────
 
@@ -764,14 +937,13 @@ class MainWindow(QMainWindow):
 
     def _launch(self, info, extra_args: list[str]):
         panel = ResultPanel(info.short_name, info.id)
-        panel.cancel_requested.connect(lambda pid=info.id: self._cancel_run(pid))
-        panel.bookmark_requested.connect(self._save_bookmark)
+        panel.cancel_requested.connect(lambda key=info.id: self._cancel_run(key))
+        self._wire_panel(panel)
 
         index = self.tabs.addTab(panel, info.short_name)
         self.tabs.setCurrentIndex(index)
         self._panels[info.id] = panel
         panel.set_running(True)
-
         self.ribbon.set_running(info.id, True)
 
         spec = RunSpec(
@@ -779,7 +951,22 @@ class MainWindow(QMainWindow):
             plugin_id=info.id,
             symbol_dirs=self.symbol_dirs,
             extra_args=extra_args,
+            output_dir=self.dumps_dir,
         )
+        self._start_runner(info.id, spec, panel)
+        log.info("Started %s %s", info.id, " ".join(extra_args))
+        self._show_status(f"Running {info.short_name}…")
+
+    def _start_runner(self, run_key: str, spec: RunSpec, panel: ResultPanel):
+        """
+        Attach a runner to a panel.
+
+        Keyed by `run_key` rather than by plugin id, because an extraction runs
+        the same plugin as the listing it was started from — keying by plugin
+        would make "dump PID 4" and the pslist tab it came from the same run,
+        and cancelling either would stop the other.
+        """
+        panel.run_key = run_key
         runner = VolatilityRunner(spec, parent=self)
         runner.columns_ready.connect(panel.set_columns)
         runner.rows_ready.connect(panel.append_rows)
@@ -787,13 +974,13 @@ class MainWindow(QMainWindow):
         runner.log_line.connect(panel.append_log)
         runner.failed.connect(panel.set_error)
         runner.run_finished.connect(
-            lambda code, pid=info.id: self._on_run_finished(code, pid)
+            lambda code, key=run_key: self._on_run_finished(code, key)
         )
-        self._runners[info.id] = runner
+        # Finished QThread objects are parented to the window and would
+        # otherwise pile up for the life of the session, one per run.
+        runner.finished.connect(runner.deleteLater)
+        self._runners[run_key] = runner
         runner.start()
-
-        log.info("Started %s %s", info.id, " ".join(extra_args))
-        self._show_status(f"Running {info.short_name}…")
 
     def _cancel_run(self, plugin_id: str):
         runner = self._runners.get(plugin_id)
@@ -801,14 +988,19 @@ class MainWindow(QMainWindow):
             runner.cancel()
             self._show_status(f"Stopping {plugin_id}…")
 
-    def _on_run_finished(self, exit_code: int, plugin_id: str):
-        runner = self._runners.pop(plugin_id, None)
-        panel = self._panels.get(plugin_id)
+    def _on_run_finished(self, exit_code: int, run_key: str):
+        runner = self._runners.pop(run_key, None)
+        panel = self._panels.get(run_key)
         cancelled = bool(runner and runner.cancelled)
+        plugin_id = panel.plugin_id if panel else run_key
+        is_extraction = "#dump" in run_key
 
         if panel:
             panel.set_finished(exit_code, cancelled=cancelled)
-            if self.db and exit_code == 0 and not cancelled:
+            # An extraction's table is a manifest of files vol3 wrote, not an
+            # analysis of the image; storing it as one would put a second,
+            # misleading "pslist" result in the case.
+            if self.db and exit_code == 0 and not cancelled and not is_extraction:
                 try:
                     self.db.save_analysis(plugin_id, panel.result_payload(),
                                           source_id=self.active_source_id)
@@ -816,12 +1008,14 @@ class MainWindow(QMainWindow):
                     log.warning("Could not store results for %s: %s", plugin_id, exc)
 
         self.ribbon.set_running(plugin_id, False)
-
-        if runner:
-            runner.wait(3000)
         self._refresh_case_tree()
 
         rows = panel.model.rowCount() if panel else 0
+        if is_extraction and exit_code == 0 and not cancelled:
+            self._show_status(
+                f"Extraction finished — {rows} file(s) written to {self.dumps_dir}"
+            )
+            return
         short = plugin_id.rsplit(".", 1)[-1]
         if cancelled:
             self._show_status(f"{short} cancelled.")
@@ -863,6 +1057,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 log.warning("Could not record the image path: %s", exc)
         self._refresh_case_tree()
+        self._refresh_evidence()
         self._show_status(f"Loaded {os.path.basename(path)}")
         self._start_os_probe()
 
@@ -912,6 +1107,262 @@ class MainWindow(QMainWindow):
             return
         self._refresh_case_tree()
         self._show_status(f"Bookmarked: {values['label']}")
+
+    def _wire_panel(self, panel: ResultPanel):
+        """Connect a results tab to the case: bookmarks, tags and extraction."""
+        panel.bookmark_requested.connect(self._save_bookmark)
+        panel.tag_requested.connect(self._apply_tag)
+        panel.dump_requested.connect(self._extract)
+        if self.db is not None:
+            panel.set_tags(self.db.get_tags())
+
+    # ── Tags ──────────────────────────────────────────────────────────────────
+
+    def _apply_tag(self, payload: dict):
+        """
+        Attach a tag to the output line the examiner right-clicked.
+
+        The whole row is stored alongside the tag, which is what makes the tag
+        navigable later: the row can be found again by its values even after
+        the table has been sorted or the plugin re-run.
+        """
+        if self.db is None:
+            QMessageBox.information(
+                self, "No Case Database",
+                "Tags belong to a case. Quick Analysis keeps nothing — create a "
+                "case to record findings.",
+            )
+            return
+
+        name = payload.pop("__tag__", "")
+        plugin = payload.pop("__plugin__", "")
+        column = payload.pop("__column__", "")
+        cell = payload.pop("__cell__", "")
+
+        if not name:
+            name = self._new_tag(return_name=True)
+            if not name:
+                return
+
+        label = _row_label(payload) or cell or "(row)"
+        description = "\n".join(f"{k}: {v}" for k, v in payload.items() if v)
+        try:
+            self.db.save_bookmark(
+                label=label, description=description, artifact_type=plugin,
+                tag=name, notes="", source_id=self.active_source_id,
+                row=payload, cell_column=column, cell_value=cell,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Tag Failed", str(exc))
+            return
+        self._refresh_case_tree()
+        self._show_status(f"Tagged as {name}: {label}")
+
+    def _new_tag(self, return_name: bool = False):
+        if self.db is None:
+            return "" if return_name else None
+        name, ok = QInputDialog.getText(self, "New Tag", "Tag name:")
+        name = name.strip() if ok else ""
+        if not name:
+            return "" if return_name else None
+        colour = QColorDialog.getColor(
+            QColor(palette(dark=self.is_dark)["accent"]), self,
+            f"Colour for “{name}”",
+        )
+        self.db.add_tag(name, colour.name() if colour.isValid()
+                        else palette(dark=self.is_dark)["accent"])
+        self._refresh_case_tree()
+        self._show_status(f"Tag “{name}” added.")
+        return name if return_name else None
+
+    def _rename_tag(self, old_name: str):
+        if self.db is None:
+            return
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Tag", "New name:", text=old_name
+        )
+        if not ok or not new_name.strip():
+            return
+        if not self.db.rename_tag(old_name, new_name.strip()):
+            QMessageBox.warning(
+                self, "Rename Failed",
+                f"“{new_name.strip()}” already exists. Merging two tags is a "
+                "different decision from renaming one, so it is not done "
+                "automatically.",
+            )
+            return
+        self._refresh_case_tree()
+        self._show_status(f"Tag renamed to {new_name.strip()}.")
+
+    def _recolour_tag(self, name: str):
+        if self.db is None:
+            return
+        current = next((t for t in self.db.get_tags() if t["name"] == name), None)
+        colour = QColorDialog.getColor(
+            QColor((current or {}).get("color") or palette(dark=self.is_dark)["accent"]),
+            self, f"Colour for “{name}”",
+        )
+        if colour.isValid():
+            self.db.set_tag_color(name, colour.name())
+            self._refresh_case_tree()
+
+    def _delete_tag(self, name: str):
+        if self.db is None:
+            return
+        count = self.db.tag_counts().get(name, 0)
+        box = QMessageBox(self)
+        box.setWindowTitle("Delete Tag")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"Delete the tag “{name}”?")
+        box.setInformativeText(
+            f"{count} finding(s) carry it."
+            if count else "Nothing is tagged with it."
+        )
+        keep = box.addButton("Delete Tag, Keep Findings",
+                             QMessageBox.ButtonRole.AcceptRole)
+        purge = box.addButton("Delete Both", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is keep:
+            self.db.delete_tag(name, delete_findings=False)
+        elif clicked is purge:
+            self.db.delete_tag(name, delete_findings=True)
+        else:
+            return
+        self._refresh_case_tree()
+        self._show_status(f"Tag “{name}” deleted.")
+
+    def _untag_finding(self, bookmark_id: int):
+        if self.db is None:
+            return
+        self.db.update_bookmark(bookmark_id, tag="")
+        self._refresh_case_tree()
+
+    def _goto_finding(self, finding: dict):
+        """
+        Follow a tag back to the output line it was taken from.
+
+        The tab is opened from the stored result if it is not already open, so
+        a tag recorded in an earlier session still leads somewhere without
+        re-running the plugin.
+        """
+        plugin = finding.get("artifact_type") or ""
+        row = finding.get("row") or {}
+        panel = self._panel_for(plugin)
+
+        if panel is None and self.db is not None:
+            stored = next(
+                (r for r in self.db.get_results() if r["plugin"] == plugin), None
+            )
+            if stored is not None:
+                self._open_stored_result(stored["id"])
+                panel = self._panel_for(plugin)
+
+        if panel is None:
+            QMessageBox.information(
+                self, "Result Not Open",
+                f"Nothing from {plugin.rsplit('.', 1)[-1] or 'that plugin'} is "
+                "open, and the case has no saved run of it. Run it again to "
+                "follow this tag.",
+            )
+            return
+
+        self.tabs.setCurrentWidget(panel)
+        if panel.select_row(row):
+            self._show_status(f"{finding.get('label', 'Finding')} — located.")
+        else:
+            self._show_status(
+                f"{finding.get('label', 'That finding')} is not in the current "
+                f"{plugin.rsplit('.', 1)[-1]} output — the image or the plugin "
+                "version may differ."
+            )
+
+    def _panel_for(self, plugin: str) -> ResultPanel | None:
+        for panel in self._result_panels():
+            if panel.plugin_id == plugin:
+                return panel
+        return None
+
+    # ── Extraction ────────────────────────────────────────────────────────────
+
+    #: What each extraction runs. vol3 writes the files itself; the table each
+    #: one returns is the manifest of what it wrote.
+    _EXTRACTORS = {
+        "process": ("windows.pslist.PsList", "Dump Process", "process executable"),
+        "memory":  ("windows.memmap.Memmap", "Dump Memory", "full process memory"),
+        "dlls":    ("windows.dlllist.DllList", "Dump DLLs", "loaded modules"),
+    }
+
+    def _extract(self, payload: dict):
+        """Extract a process's executable, memory or modules to the case."""
+        kind = payload.get("__dump__", "")
+        pid = str(payload.get("__pid__", "")).strip()
+        plugin_id, title, what = self._EXTRACTORS.get(kind, (None, "", ""))
+        if plugin_id is None or not pid:
+            return
+
+        info = self.registry.get(plugin_id)
+        if info is None:
+            QMessageBox.warning(
+                self, "Not Available",
+                f"{plugin_id} is not in this volatility3 installation.",
+            )
+            return
+
+        target = self.dumps_dir
+        if not target:
+            QMessageBox.information(
+                self, "No Case Folder",
+                "Quick Analysis has nowhere to put extracted files. Create a "
+                "case first.",
+            )
+            return
+        try:
+            os.makedirs(target, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.critical(self, "Extraction Failed",
+                                 f"Could not create {target}:\n\n{exc}")
+            return
+
+        if kind == "memory":
+            answer = QMessageBox.question(
+                self, "Dump Process Memory",
+                f"Writing the full memory of PID {pid} can produce a file as "
+                "large as the process's address space — often gigabytes.\n\n"
+                f"It will be written to:\n{target}\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        run_key = f"{plugin_id}#dump{pid}"
+        if run_key in self._runners:
+            self._show_status(f"Already extracting from PID {pid}.")
+            return
+
+        panel = ResultPanel(f"{title} {pid}", plugin_id)
+        panel.cancel_requested.connect(lambda key=run_key: self._cancel_run(key))
+        self._wire_panel(panel)
+        panel.append_log(f"Extracting {what} for PID {pid} into {target}")
+        index = self.tabs.addTab(panel, f"{title} {pid}")
+        self.tabs.setCurrentIndex(index)
+        self._panels[run_key] = panel
+        panel.set_running(True)
+
+        spec = RunSpec(
+            image_path=self.case.image_path,
+            plugin_id=plugin_id,
+            symbol_dirs=self.symbol_dirs,
+            extra_args=["--pid", pid, "--dump"],
+            output_dir=target,
+        )
+        self._start_runner(run_key, spec, panel)
+        if self.db is not None:
+            self.db.log_action("extract", f"{what} PID {pid} -> {target}",
+                               self.case.examiner_name)
+        self._show_status(f"Extracting {what} for PID {pid}…")
 
     def _generate_report(self):
         """Write an HTML or JSON case report into the case's reports folder."""
@@ -995,7 +1446,7 @@ class MainWindow(QMainWindow):
         widget = self.tabs.widget(index)
         if not isinstance(widget, ResultPanel):
             return
-        plugin_id = widget.plugin_id
+        plugin_id = getattr(widget, "run_key", "") or widget.plugin_id
         if plugin_id in self._runners:
             answer = QMessageBox.question(
                 self, "Stop Analysis?",
@@ -1023,7 +1474,9 @@ class MainWindow(QMainWindow):
         # Tiles and badges are styled by property, so the new sheet reaches them
         # without any per-widget work — but Qt needs telling to re-evaluate the
         # property-driven rules.
+        icons.clear_cache()
         self._update_os_badge()
+        self.ribbon.repaint_glyphs()
         if getattr(self, "case_tree", None) is not None:
             self.case_tree.apply_theme(self.is_dark)
             self._refresh_case_tree()
@@ -1053,18 +1506,23 @@ class MainWindow(QMainWindow):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _stat_card(title: str, value: str) -> QWidget:
-    card = QWidget()
-    card.setObjectName("statCard")
-    layout = QVBoxLayout(card)
-    layout.setSpacing(4)
-    value_lbl = QLabel(value)
-    value_lbl.setObjectName("statValue")
-    title_lbl = QLabel(title)
-    title_lbl.setObjectName("statTitle")
-    layout.addWidget(value_lbl)
-    layout.addWidget(title_lbl)
-    return card
+def _row_label(row: dict) -> str:
+    """
+    A short human label for an output row.
+
+    The first column of most vol3 output is a PID or an offset, which says
+    nothing on its own in a tag list; a name is what an examiner recognises.
+    """
+    for key in ("ImageFileName", "Process", "Name", "BaseDllName", "Key",
+                "Path", "FullDllPath", "Value", "File output"):
+        value = str(row.get(key) or "").strip()
+        if value and value not in ("N/A", "-"):
+            return value if len(value) <= 60 else "…" + value[-59:]
+    for value in row.values():
+        text = str(value or "").strip()
+        if text:
+            return text[:60]
+    return ""
 
 
 def _format_size(path: str) -> str:

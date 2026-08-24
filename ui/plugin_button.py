@@ -19,12 +19,13 @@ from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import QLabel, QStyle, QStyleOption, QVBoxLayout, QWidget
 
 from core.plugins import PluginInfo
-from ui.theme import restyle
+from ui import icons
+from ui.theme import palette, restyle
 
-# (width, height, icon point size, wrap labels)
+# (width, height, glyph size, wrap labels)
 _SIZES = {
-    "compact":     (88, 66, 16, True),
-    "comfortable": (116, 100, 26, True),
+    "compact":     (88, 62, 17, True),
+    "comfortable": (116, 92, 24, True),
 }
 
 
@@ -49,7 +50,8 @@ class PluginButton(QWidget):
         layout.setSpacing(2)
         layout.setContentsMargins(4, 5, 4, 4)
 
-        self.icon_lbl = QLabel(self.info.icon or "🔬")
+        self.glyph = icons.for_emoji(self.info.icon)
+        self.icon_lbl = QLabel()
         self.icon_lbl.setObjectName("pluginButtonIcon")
         self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -90,9 +92,10 @@ class PluginButton(QWidget):
         self._apply_density()
 
     def _apply_density(self):
-        width, height, icon_size, wrap = _SIZES[self._density]
+        width, height, glyph_size, wrap = _SIZES[self._density]
         self.setFixedSize(width, height)
-        self.icon_lbl.setStyleSheet(f"font-size: {icon_size}px; background: transparent;")
+        self._glyph_size = glyph_size
+        self._paint_glyph()
         self.name_lbl.setWordWrap(wrap)
         self.name_lbl.setText(self._wrapped_name())
         self.badge_lbl.setVisible(self._density == "comfortable" or self._running)
@@ -117,6 +120,7 @@ class PluginButton(QWidget):
     def set_running(self, running: bool):
         self._running = running
         self.setProperty("state", "running" if running else "idle")
+        self._paint_glyph()
         self._update_badge()
         self.badge_lbl.setVisible(self._density == "comfortable" or running)
         restyle(self)
@@ -128,6 +132,19 @@ class PluginButton(QWidget):
             self.badge_lbl.setText("needs input")
         else:
             self.badge_lbl.setText("")
+
+    def _paint_glyph(self):
+        """
+        Draw the glyph in the plugin's category colour, dimmed when idle so a
+        ribbon of fifty tiles is not fifty competing points of colour. The
+        running tile is the one that should stand out.
+        """
+        ratio = self.devicePixelRatioF() or 1.0
+        color = self.info.color or palette()["text_dim"]
+        self.icon_lbl.setPixmap(icons.pixmap(
+            self.glyph, size=self._glyph_size, color=color,
+            width=1.8 if self._running else 1.6, ratio=ratio,
+        ))
 
     def paintEvent(self, event):
         """

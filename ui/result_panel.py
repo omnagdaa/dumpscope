@@ -17,8 +17,9 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from ui import icons
 from ui.result_model import ResultFilterProxy, ResultTableModel
-from ui.theme import restyle
+from ui.theme import palette, restyle
 
 # Sensible starting widths for columns vol3 emits constantly. Anything not
 # listed is sized from its header text, bounded so one wide column cannot push
@@ -47,14 +48,21 @@ class ResultPanel(QWidget):
 
     cancel_requested = pyqtSignal()
     bookmark_requested = pyqtSignal(dict)   # the selected row as {column: value}
+    tag_requested      = pyqtSignal(dict)   # row + __tag__ (empty for "new tag…")
+    dump_requested     = pyqtSignal(dict)   # row + __dump__ (what to extract) + __pid__
 
     def __init__(self, plugin_name: str, plugin_id: str = "", parent=None):
         super().__init__(parent)
         self.plugin_name = plugin_name
         self.plugin_id = plugin_id
+        # Distinguishes two tabs running the same plugin — a listing and an
+        # extraction started from it. Set by MainWindow when a runner attaches.
+        self.run_key = plugin_id
         self._running = False
         self._log_lines: list[str] = []
         self._sorting_enabled = False
+        # Filled in by MainWindow; the panel does not reach into the database.
+        self.tags: list[dict] = []
 
         self.model = ResultTableModel(self)
         self.proxy = ResultFilterProxy(self)
@@ -318,21 +326,111 @@ class ResultPanel(QWidget):
         index = self.table.indexAt(point)
         if not index.isValid():
             return
+
+        # The row is read out *now*, not captured as a QModelIndex. exec() below
+        # runs a nested event loop and rows keep streaming in during it, so an
+        # index captured beforehand can be pointing at a different line by the
+        # time an action fires — which would silently tag the wrong evidence.
+        cell = str(index.data() or "")
+        column = (self.model.columns[index.column()]
+                  if index.column() < len(self.model.columns) else "")
+        row = self.model.row_dict(self.proxy.mapToSource(index).row())
+        if not row:
+            return
+
         menu = QMenu(self)
-        menu.addAction("Copy Cell", lambda: self._copy_cell(index))
+        menu.addAction("Copy Cell", lambda: QApplication.clipboard().setText(cell))
         menu.addAction("Copy Row", self.copy_selection)
+
         menu.addSeparator()
-        menu.addAction("Add Bookmark", lambda: self._bookmark(index))
+        self._add_tag_menu(menu, row, column, cell)
+        menu.addAction("Add Bookmark…",
+                       lambda: self._emit_row(self.bookmark_requested, row))
+
+        pid = self._pid_of(row)
+        if pid:
+            menu.addSeparator()
+            extract = menu.addMenu(f"Extract from PID {pid}")
+            for label, action in (("Process Executable", "process"),
+                                  ("Process Memory (full)", "memory"),
+                                  ("Loaded DLLs", "dlls")):
+                extract.addAction(label, lambda a=action, p=pid: self.dump_requested.emit(
+                    {**row, "__dump__": a, "__pid__": p, "__plugin__": self.plugin_id}
+                ))
+
+        menu.addSeparator()
+        if pid:
+            menu.addAction(f"Filter to PID {pid}", lambda p=pid: self.filter_box.setText(p))
+        if column and cell:
+            menu.addAction(f"Filter to this {column}",
+                           lambda: self.filter_box.setText(cell))
         menu.exec(self.table.viewport().mapToGlobal(point))
 
-    def _copy_cell(self, index):
-        QApplication.clipboard().setText(str(index.data() or ""))
+    def _add_tag_menu(self, menu: QMenu, row: dict, column: str, cell: str):
+        submenu = menu.addMenu("Tag as")
+        payload = {**row, "__plugin__": self.plugin_id,
+                   "__column__": column, "__cell__": cell}
+        for tag in self.tags:
+            action = submenu.addAction(tag["name"])
+            action.setIcon(icons.icon("tag", 13, tag.get("color") or palette()["text_dim"]))
+            action.triggered.connect(
+                lambda _=False, name=tag["name"]:
+                    self.tag_requested.emit({**payload, "__tag__": name})
+            )
+        if self.tags:
+            submenu.addSeparator()
+        submenu.addAction("New Tag…",
+                          lambda: self.tag_requested.emit({**payload, "__tag__": ""}))
 
-    def _bookmark(self, index):
-        source_row = self.proxy.mapToSource(index).row()
-        payload = self.model.row_dict(source_row)
-        payload["__plugin__"] = self.plugin_id or self.plugin_name
-        self.bookmark_requested.emit(payload)
+    def _emit_row(self, signal, row: dict):
+        signal.emit({**row, "__plugin__": self.plugin_id or self.plugin_name})
+
+    def _pid_of(self, row: dict) -> str:
+        """
+        The PID this row is about, if it has one.
+
+        Extraction is offered per process, and most Windows plugins carry the
+        owning PID under one of these names. A value that is not a positive
+        integer is not a PID, whatever the column happens to be called.
+        """
+        for name in ("PID", "Pid", "ProcessID", "Process ID", "OwnerPid"):
+            value = str(row.get(name) or "").strip()
+            if value.isdigit() and int(value) > 0:
+                return value
+        return ""
+
+    def set_tags(self, tags: list[dict]):
+        self.tags = list(tags)
+
+    def select_row(self, wanted: dict) -> bool:
+        """
+        Find and reveal the row a tag was taken from.
+
+        Matched on values rather than on an index, so it still works after the
+        table has been sorted or the plugin re-run. Any active filter is
+        cleared first: a row hidden by a filter cannot be selected, and
+        silently doing nothing would look like the tag had been lost.
+        """
+        if not wanted:
+            return False
+        keys = [k for k in wanted if not k.startswith("__")]
+        target = self.model.find_row(wanted, keys)
+        if target < 0:
+            return False
+
+        if self.filter_box.text():
+            self.filter_box.clear()
+
+        proxy_index = self.proxy.mapFromSource(self.model.index(target, 0))
+        if not proxy_index.isValid():
+            return False
+        self.view_btn.setChecked(False)
+        self.stack.setCurrentIndex(0)
+        self.table.selectRow(proxy_index.row())
+        self.table.scrollTo(proxy_index,
+                            QAbstractItemView.ScrollHint.PositionAtCenter)
+        self.table.setFocus()
+        return True
 
     # ── Copy / export ─────────────────────────────────────────────────────────
 

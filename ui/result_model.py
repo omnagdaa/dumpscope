@@ -252,6 +252,30 @@ class ResultTableModel(QAbstractTableModel):
     def row_dict(self, row: int) -> dict[str, str]:
         return dict(zip(self._columns, self.row_values(row)))
 
+    def find_row(self, wanted: dict, keys: list[str] | None = None) -> int:
+        """
+        The index of the row matching `wanted`, or -1.
+
+        Matching is by value across the named columns, because a tag recorded
+        yesterday has to survive today's sort order and today's re-run. Columns
+        the current output does not have are ignored rather than treated as a
+        mismatch: plugins gain and lose columns between volatility3 releases,
+        and a tag should not stop working because of it.
+        """
+        lookup = {name: index for index, name in enumerate(self._columns)}
+        pairs = [
+            (lookup[name], str(wanted[name]))
+            for name in (keys or list(wanted))
+            if name in lookup
+        ]
+        if not pairs:
+            return -1
+        for index, values in enumerate(self._rows):
+            if all(column < len(values) and values[column] == value
+                   for column, value in pairs):
+                return index
+        return -1
+
 
 class ResultFilterProxy(QSortFilterProxyModel):
     """Case-insensitive substring filter across every column, with typed sorting."""

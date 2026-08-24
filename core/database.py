@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("dumpscope.database")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cases (
@@ -81,9 +81,16 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     artifact_type TEXT,
     tag           TEXT,
     notes         TEXT,
+    -- v4: enough to navigate back to the row this was taken from. row_json is
+    -- the whole {column: value} mapping, so the row can be found again after a
+    -- re-run even though its index will have moved.
+    row_json      TEXT,
+    cell_column   TEXT,
+    cell_value    TEXT,
     created_at    TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_bookmarks_case ON bookmarks (case_id);
+CREATE INDEX IF NOT EXISTS idx_bookmarks_tag ON bookmarks (case_id, tag);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,6 +191,10 @@ class Database:
                 ("source_id", "INTEGER"),
                 ("tag", "TEXT"),
                 ("notes", "TEXT"),
+                # v4: what the tag was attached to, so it can be navigated back to.
+                ("row_json", "TEXT"),
+                ("cell_column", "TEXT"),
+                ("cell_value", "TEXT"),
             ),
         }
         for table, wanted in additions.items():
@@ -387,20 +398,40 @@ class Database:
 
     def save_bookmark(self, label: str, description: str, artifact_type: str,
                       tag: str = "", notes: str = "",
-                      source_id: int | None = None) -> int | None:
+                      source_id: int | None = None,
+                      row: dict | None = None,
+                      cell_column: str = "", cell_value: str = "") -> int | None:
+        """
+        Record a tagged finding.
+
+        `row` is the full {column: value} mapping of the output line it was
+        taken from. Storing it — rather than a row index — is what lets the tag
+        be followed back to its line after the plugin has been re-run against a
+        different image, or after the table has been sorted.
+        """
         if self.case_id is None:
             return None
         with self._connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO bookmarks
                        (case_id, source_id, label, description, artifact_type,
-                        tag, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        tag, notes, row_json, cell_column, cell_value)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (self.case_id, source_id, label, description, artifact_type,
-                 tag, notes),
+                 tag, notes, json.dumps(row or {}), cell_column, cell_value),
             )
-            self._audit(conn, "bookmark_added", label, None)
+            self._audit(conn, "bookmark_added", f"{tag or 'untagged'}: {label}", None)
             return cursor.lastrowid
+
+    @staticmethod
+    def _decode_bookmark(record: dict) -> dict:
+        """Turn the stored row_json back into a mapping the UI can navigate by."""
+        raw = record.get("row_json")
+        try:
+            record["row"] = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            record["row"] = {}
+        return record
 
     def get_bookmarks(self, tag: str | None = None) -> list[dict]:
         query = ("SELECT b.*, s.display_name AS source_name, t.color AS tag_color "
@@ -414,7 +445,7 @@ class Database:
             params += (tag,)
         query += " ORDER BY b.created_at DESC, b.id DESC"
         with self._connect() as conn:
-            return [dict(r) for r in conn.execute(query, params)]
+            return [self._decode_bookmark(dict(r)) for r in conn.execute(query, params)]
 
     # ── Data sources ──────────────────────────────────────────────────────────
 
@@ -525,6 +556,70 @@ class Database:
             return [dict(r) for r in conn.execute(
                 "SELECT * FROM tags WHERE case_id = ? ORDER BY id", (self.case_id,)
             )]
+
+    def tag_counts(self) -> dict[str, int]:
+        """How many findings carry each tag, for the sidebar's counts."""
+        if self.case_id is None:
+            return {}
+        with self._connect() as conn:
+            return {
+                r["tag"]: r["n"] for r in conn.execute(
+                    "SELECT tag, COUNT(*) AS n FROM bookmarks "
+                    "WHERE case_id = ? AND tag IS NOT NULL AND tag != '' "
+                    "GROUP BY tag", (self.case_id,)
+                )
+            }
+
+    def rename_tag(self, old_name: str, new_name: str) -> bool:
+        """
+        Rename a tag, carrying every finding that uses it along.
+
+        Returns False if the new name is already taken — merging two tags is a
+        different decision from renaming one, and silently doing it would lose
+        the distinction the examiner drew.
+        """
+        new_name = new_name.strip()
+        if self.case_id is None or not new_name or new_name == old_name:
+            return False
+        with self._connect() as conn:
+            clash = conn.execute(
+                "SELECT 1 FROM tags WHERE case_id = ? AND name = ?",
+                (self.case_id, new_name),
+            ).fetchone()
+            if clash:
+                return False
+            conn.execute("UPDATE tags SET name = ? WHERE case_id = ? AND name = ?",
+                         (new_name, self.case_id, old_name))
+            conn.execute("UPDATE bookmarks SET tag = ? WHERE case_id = ? AND tag = ?",
+                         (new_name, self.case_id, old_name))
+            self._audit(conn, "tag_renamed", f"{old_name} -> {new_name}", None)
+        return True
+
+    def set_tag_color(self, name: str, color: str):
+        if self.case_id is None:
+            return
+        with self._connect() as conn:
+            conn.execute("UPDATE tags SET color = ? WHERE case_id = ? AND name = ?",
+                         (color, self.case_id, name))
+
+    def delete_tag(self, name: str, delete_findings: bool = False):
+        """
+        Remove a tag. By default the findings it was applied to are kept and
+        simply become untagged — deleting an examiner's recorded observations
+        as a side effect of tidying a label would be the wrong default.
+        """
+        if self.case_id is None:
+            return
+        with self._connect() as conn:
+            if delete_findings:
+                conn.execute("DELETE FROM bookmarks WHERE case_id = ? AND tag = ?",
+                             (self.case_id, name))
+            else:
+                conn.execute("UPDATE bookmarks SET tag = '' WHERE case_id = ? AND tag = ?",
+                             (self.case_id, name))
+            conn.execute("DELETE FROM tags WHERE case_id = ? AND name = ?",
+                         (self.case_id, name))
+            self._audit(conn, "tag_deleted", name, None)
 
     def add_tag(self, name: str, color: str = "#58a6ff") -> int | None:
         if self.case_id is None or not name.strip():

@@ -121,11 +121,23 @@ class RunSpec:
     plugin_id: str
     symbol_dirs: list[str]
     extra_args: list[str]
+    # Where --dump writes what it extracts. vol3 defaults to the process's
+    # working directory, which for a GUI is wherever it happened to be started
+    # from — so extractions would land outside the case with nothing recording
+    # where they went.
+    output_dir: str = ""
+    # vol3's own worker pool for a single plugin. "off" is its default.
+    parallelism: str = ""
 
     def command(self) -> list[str]:
+        command = find_vol3_command() + ["-r", "csv"]
+        if self.output_dir:
+            command += ["-o", os.path.abspath(self.output_dir)]
+        if self.parallelism:
+            command += ["--parallelism", self.parallelism]
         return (
-            find_vol3_command()
-            + ["-r", "csv", "-f", os.path.abspath(self.image_path)]
+            command
+            + ["-f", os.path.abspath(self.image_path)]
             + [self.plugin_id]
             + list(self.extra_args)
         )

@@ -15,7 +15,8 @@ from datetime import datetime
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
+    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
+    QLabel, QListWidget,
     QListWidgetItem, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -227,13 +228,35 @@ class CaseManager(QDialog):
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def _new_case(self):
-        from ui.wizard import CaseWizard
-        wizard = CaseWizard(parent=self)
-        if wizard.exec() != QDialog.DialogCode.Accepted:
+        """
+        Create a case and go straight to it.
+
+        This used to open a three-page wizard to collect a case number, an
+        examiner and notes before anything could be looked at. None of that is
+        needed to start work, and asking for it up front means typing details
+        about an image nobody has opened yet. A case needs a name and a folder;
+        everything else is edited in the Case tab of the main window, next to
+        the evidence it describes.
+        """
+        name, ok = QInputDialog.getText(
+            self, "New Case", "Case name:", text="Case 1"
+        )
+        if not ok or not name.strip():
             return
-        case = wizard.get_case()
-        if case is None:
+
+        parent_dir = QFileDialog.getExistingDirectory(
+            self, f"Where should “{name.strip()}” be created?",
+            os.path.expanduser("~"),
+        )
+        if not parent_dir:
             return
+
+        try:
+            case = Case.create(parent_dir, name.strip())
+        except CaseError as exc:
+            QMessageBox.critical(self, "Could Not Create Case", str(exc))
+            return
+        remember_case(case)
         self._accept_case(case)
 
     def _open_case_folder(self):

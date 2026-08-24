@@ -359,8 +359,31 @@ QDockWidget::title {
     font-size: 11px;
     font-weight: 700;
 }
-QWidget#caseTree { background-color: $surface; }
-QTreeWidget#caseTree { border-right: 1px solid $border; }
+QWidget#caseTree, QWidget#tagPanel { background-color: $surface; }
+QTreeWidget#caseTree, QTreeWidget#tagTree { background-color: $surface; }
+
+/* Section headers inside the dock. */
+QWidget#dockHeader {
+    background-color: $surface_high;
+    border-top: 1px solid $border;
+    border-bottom: 1px solid $border;
+}
+QLabel#dockHeading {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1.2px;
+    color: $text_faint;
+}
+QPushButton#iconButton {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 0;
+    color: $text_dim;
+    font-size: 15px;
+    font-weight: 700;
+}
+QPushButton#iconButton:hover { background-color: $surface_alt; color: $accent; }
 
 /* ── Application chrome ────────────────────────────────────────────────── */
 QWidget#topBar {
@@ -383,9 +406,10 @@ QLabel#imageLabel[loaded="false"] { color: $text_faint; font-style: italic; }
 
 /* The OS badge is set by property, not inline stylesheet, so a theme change
    repaints it along with everything else. */
+QLabel#osGlyph { background: transparent; padding-left: 4px; }
 QLabel#osBadge {
     border-radius: 4px;
-    padding: 3px 9px;
+    padding: 3px 9px 3px 5px;
     font-size: 11px;
     font-weight: 700;
     background-color: $surface_high;

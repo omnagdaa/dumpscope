@@ -58,6 +58,7 @@ def test_widgets_do_not_hardcode_colours():
         "theme.py",           # the palettes themselves
         "plugin_ribbon.py",   # a plugin category's colour, which is data
         "wizard.py",          # the "required field" asterisk
+        "icons.py",           # the neutral ink a glyph falls back to
     }
     offenders = {}
     for path in UI_DIR.glob("*.py"):
