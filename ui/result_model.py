@@ -28,6 +28,8 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QColor, QFont
 
+from ui.theme import palette
+
 TREE_DEPTH_COLUMN = "TreeDepth"
 
 _HEX_RE = re.compile(r"^0x[0-9a-fA-F]+$")
@@ -58,6 +60,7 @@ class ResultTableModel(QAbstractTableModel):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._faint = QColor(palette(dark=True)["text_faint"])
         self._columns: list[str] = []
         self._rows: list[list[str]] = []
         self._depths: list[int] = []
@@ -200,11 +203,19 @@ class ResultTableModel(QAbstractTableModel):
             return None
 
         if role == Qt.ItemDataRole.ForegroundRole:
+            # Blank and N/A cells are dimmed so a sparse column reads as sparse
+            # rather than as a wall of identical text. A brush cannot come from
+            # the stylesheet, so the colour is taken from the palette instead.
             if not value or value == "N/A":
-                return QColor("#6e7681")
+                return self._faint
             return None
 
         return None
+
+    def apply_theme(self, dark: bool):
+        """Follow the palette for the colours Qt paints with a brush."""
+        self._faint = QColor(palette(dark=dark)["text_faint"])
+        self.layoutChanged.emit()
 
     # ── Sorting ───────────────────────────────────────────────────────────────
 

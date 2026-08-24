@@ -21,23 +21,27 @@ from PyQt6.QtWidgets import (
 from core.case import Case, remember_case
 from core.database import Database
 from core.plugins import PluginRegistry, build_command_args
-from core.vol_runner import OsProbe, RunSpec, VolatilityRunner
+from core.os_detect import ImageProbe, ImageProfile
+from core.vol_runner import RunSpec, VolatilityRunner
 from core.hash_worker import HashWorker
 from core.report import write_report
 from ui.bookmark_dialog import BookmarkDialog
 from ui.case_tree import CaseTree
 from ui.plugin_args_dialog import PluginArgsDialog
-from ui.plugin_button import PluginButton
+from ui.plugin_ribbon import PluginRibbon
 from ui.result_panel import ResultPanel
-from ui.theme import DARK_THEME, LIGHT_THEME
+from ui.theme import build as build_theme, restyle
 
 log = logging.getLogger("dumpscope.main_window")
 
+# Icon and display name only. The badge's colours are chosen by the stylesheet
+# from its `os` property, so a theme change repaints it like everything else.
 OS_BADGES = {
-    "windows": ("🪟", "Windows", "#1f3d5c", "#58a6ff"),
-    "linux":   ("🐧", "Linux",   "#1a3d1a", "#3fb950"),
-    "mac":     ("🍎", "macOS",   "#3d2a1a", "#f0883e"),
+    "windows": ("🪟", "Windows"),
+    "linux":   ("🐧", "Linux"),
+    "mac":     ("🍎", "macOS"),
 }
+DEFAULT_OS = "windows"
 
 IMAGE_FILTER = (
     "Memory Images (*.raw *.mem *.vmem *.dmp *.img *.bin *.lime *.core *.vmss *.vmsn);;"
@@ -53,12 +57,14 @@ class MainWindow(QMainWindow):
         self.case = case if isinstance(case, Case) else Case.from_dict(case)
         self.is_dark = self.case.is_dark
         self.registry = registry or PluginRegistry.load()
-        self.current_os = "windows"
+        # Empty until the probe reports, so the first set_os always builds the
+        # ribbon rather than being short-circuited as "already showing that OS".
+        self.current_os = ""
+        self.profile = ImageProfile()
 
         self._runners: dict[str, VolatilityRunner] = {}
         self._panels: dict[str, ResultPanel] = {}
-        self._plugin_buttons: dict[str, PluginButton] = {}
-        self._os_probe: OsProbe | None = None
+        self._os_probe: ImageProbe | None = None
         self.active_source_id: int | None = None
 
         self.db = self._open_case_database()
@@ -146,12 +152,12 @@ class MainWindow(QMainWindow):
 
         root.addWidget(self._build_topbar())
 
-        self.ribbon_host = QWidget()
-        self.ribbon_host_layout = QVBoxLayout(self.ribbon_host)
-        self.ribbon_host_layout.setContentsMargins(0, 0, 0, 0)
-        self.ribbon = self._build_ribbon(self.current_os)
-        self.ribbon_host_layout.addWidget(self.ribbon)
-        root.addWidget(self.ribbon_host)
+        self.ribbon = PluginRibbon(self.registry, compact=True)
+        self.ribbon.plugin_clicked.connect(self._on_plugin_clicked)
+        root.addWidget(self.ribbon)
+        # Something has to be on the ribbon before the probe reports, and the
+        # probe cannot report at all until an image is loaded.
+        self.set_os(DEFAULT_OS, quiet=True)
 
         self._build_case_dock()
 
@@ -160,6 +166,7 @@ class MainWindow(QMainWindow):
         self.tabs.setMovable(True)
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.tabs.addTab(self._build_overview_tab(), "Overview")
+        self._refresh_image_facts()
         self.tabs.tabBar().setTabButton(0, self.tabs.tabBar().ButtonPosition.RightSide, None)
         root.addWidget(self.tabs, 1)
 
@@ -282,6 +289,10 @@ class MainWindow(QMainWindow):
         if source_id == self.active_source_id:
             self.case.md5, self.case.sha256 = md5, sha256
             self.case.save()
+            for key, value in (("md5", md5), ("sha256", sha256)):
+                field = getattr(self, "hash_fields", {}).get(key)
+                if field is not None:
+                    field.setText(value or "—")
         self._refresh_case_tree()
         self._show_status(f"Hashed — MD5 {md5[:16]}…")
 
@@ -380,6 +391,26 @@ class MainWindow(QMainWindow):
         theme_action.triggered.connect(self.toggle_theme)
         view_menu.addAction(theme_action)
 
+        search_action = QAction("Search Plugins", self)
+        search_action.setShortcut("Ctrl+P")
+        search_action.triggered.connect(lambda: self.ribbon.focus_search())
+        view_menu.addAction(search_action)
+
+        self.density_action = QAction("Large Plugin Tiles", self)
+        self.density_action.setCheckable(True)
+        self.density_action.setShortcut("Ctrl+Shift+D")
+        self.density_action.toggled.connect(
+            lambda large: self.ribbon.set_compact(not large)
+        )
+        view_menu.addAction(self.density_action)
+
+        identify_action = QAction("Re-identify Image", self)
+        identify_action.triggered.connect(self._start_os_probe)
+        view_menu.addAction(identify_action)
+        view_menu.addSeparator()
+
+        # Detection can be overridden: an examiner who knows what the image is
+        # should not have to wait for a scan to agree with them.
         for os_name in ("windows", "linux", "mac"):
             action = QAction(f"Show {OS_BADGES[os_name][1]} Plugins", self)
             action.triggered.connect(lambda _, name=os_name: self.set_os(name, manual=True))
@@ -420,12 +451,13 @@ class MainWindow(QMainWindow):
         image_path = self.case.image_path
         self.image_lbl = QLabel()
         self.image_lbl.setObjectName("imageLabel")
+        self.image_lbl.setProperty("loaded", "false")
         self._set_image_label(image_path)
 
         self.os_badge = QLabel()
         self.os_badge.setObjectName("osBadge")
 
-        symbols_btn = QPushButton("Symbols & YARA")
+        symbols_btn = QPushButton("Symbols && YARA")
         symbols_btn.setFixedWidth(140)
         symbols_btn.clicked.connect(self._open_symbol_manager)
 
@@ -444,72 +476,6 @@ class MainWindow(QMainWindow):
 
         self._update_os_badge()
         return bar
-
-    def _build_ribbon(self, os_name: str) -> QWidget:
-        outer = QWidget()
-        outer.setObjectName("pluginRibbon")
-        outer.setFixedHeight(152)
-
-        scroll = QScrollArea(outer)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-
-        inner = QWidget()
-        inner.setStyleSheet("background: transparent;")
-        row = QHBoxLayout(inner)
-        row.setContentsMargins(16, 6, 16, 6)
-        row.setSpacing(0)
-        row.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-        self._plugin_buttons.clear()
-        groups = self.registry.ribbon(os_name)
-
-        for index, (category, color, plugins) in enumerate(groups):
-            group = QWidget()
-            group.setStyleSheet("background: transparent;")
-            column = QVBoxLayout(group)
-            column.setContentsMargins(8, 0, 8, 0)
-            column.setSpacing(4)
-
-            heading = QLabel(category.upper())
-            heading.setStyleSheet(
-                f"font-size: 9px; font-weight: 800; color: {color};"
-                "background: transparent; letter-spacing: 1.5px;"
-            )
-            heading.setFixedHeight(14)
-
-            tiles = QWidget()
-            tiles.setStyleSheet("background: transparent;")
-            tile_row = QHBoxLayout(tiles)
-            tile_row.setContentsMargins(0, 0, 0, 0)
-            tile_row.setSpacing(6)
-
-            for info in plugins:
-                button = PluginButton(info, dark=self.is_dark)
-                button.clicked.connect(self._on_plugin_clicked)
-                self._plugin_buttons[info.id] = button
-                tile_row.addWidget(button)
-
-            column.addWidget(heading)
-            column.addWidget(tiles)
-            row.addWidget(group)
-
-            if index < len(groups) - 1:
-                divider = QFrame()
-                divider.setFrameShape(QFrame.Shape.VLine)
-                divider.setFixedWidth(1)
-                divider.setObjectName("ribbonDivider")
-                row.addWidget(divider)
-
-        row.addStretch()
-        scroll.setWidget(inner)
-
-        layout = QVBoxLayout(outer)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(scroll)
-        return outer
 
     def _build_overview_tab(self) -> QWidget:
         area = QScrollArea()
@@ -536,25 +502,34 @@ class MainWindow(QMainWindow):
         summary = QGroupBox("Case Summary")
         grid = QGridLayout(summary)
         grid.setSpacing(12)
-        image_path = self.case.image_path
-        grid.addWidget(_stat_card("Image Size", _format_size(image_path)), 0, 0)
-        grid.addWidget(_stat_card("Case Number",
-                                  self.case.case_number or "—"), 0, 1)
-        grid.addWidget(_stat_card("Examiner",
-                                  self.case.examiner_name or "—"), 0, 2)
-        grid.addWidget(_stat_card("Plugins Available",
-                                  str(len(self.registry.for_os(self.current_os)))), 0, 3)
+        self.stat_size = _stat_card("Image Size", _format_size(self.case.image_path))
+        self.stat_plugins = _stat_card("Plugins Available", "—")
+        grid.addWidget(self.stat_size, 0, 0)
+        grid.addWidget(_stat_card("Case Number", self.case.case_number or "—"), 0, 1)
+        grid.addWidget(_stat_card("Examiner", self.case.examiner_name or "—"), 0, 2)
+        grid.addWidget(self.stat_plugins, 0, 3)
         layout.addWidget(summary)
+
+        # What the probe worked out about the image. Populated by
+        # _refresh_image_facts once identification finishes.
+        self.profile_group = QGroupBox("Image Profile")
+        self.profile_grid = QGridLayout(self.profile_group)
+        self.profile_grid.setSpacing(8)
+        self.profile_grid.setColumnStretch(1, 1)
+        self.profile_grid.setColumnStretch(3, 1)
+        layout.addWidget(self.profile_group)
 
         integrity = QGroupBox("Image Integrity")
         integrity_grid = QGridLayout(integrity)
         integrity_grid.setSpacing(10)
         integrity_grid.setColumnStretch(1, 1)
+        self.hash_fields = {}
         for row_index, (label, key) in enumerate((("MD5", "md5"), ("SHA-256", "sha256"))):
             name = QLabel(label)
             name.setFixedWidth(70)
             value = QLineEdit(getattr(self.case, key, "") or "—")
             value.setReadOnly(True)
+            self.hash_fields[key] = value
             integrity_grid.addWidget(name, row_index, 0)
             integrity_grid.addWidget(value, row_index, 1)
         layout.addWidget(integrity)
@@ -572,56 +547,161 @@ class MainWindow(QMainWindow):
         area.setWidget(inner)
         return area
 
+    def _refresh_image_facts(self):
+        """
+        Redraw the Image Profile card from the current probe result.
+
+        The grid is rebuilt rather than updated in place: the set of facts
+        volatility3 returns differs between images, so there is no fixed set of
+        rows to keep around.
+        """
+        grid = getattr(self, "profile_grid", None)
+        if grid is None:
+            return
+        while grid.count():
+            item = grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        facts: list[tuple[str, str]] = []
+        if self.profile.os:
+            facts.append(("Operating System", self.profile.summary()))
+        if self.profile.container:
+            facts.append(("Container", self.profile.container))
+        facts.extend(self.profile.details.items())
+
+        if not facts:
+            placeholder = QLabel(
+                "Load an image to identify it."
+                if not self.case.image_path else
+                "Identifying the image…"
+            )
+            placeholder.setObjectName("overviewBlurb")
+            grid.addWidget(placeholder, 0, 0, 1, 4)
+            return
+
+        # Two label/value pairs per row; long values still get the full width.
+        for index, (label, value) in enumerate(facts):
+            row, column = divmod(index, 2)
+            name = QLabel(label)
+            name.setObjectName("statTitle")
+            field = QLabel(str(value))
+            field.setObjectName("fieldLabel")
+            field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            field.setWordWrap(True)
+            grid.addWidget(name, row, column * 2)
+            grid.addWidget(field, row, column * 2 + 1)
+
+        self.stat_plugins.findChild(QLabel, "statValue").setText(
+            str(self.ribbon.plugin_count())
+        )
+        self.stat_size.findChild(QLabel, "statValue").setText(
+            _format_size(self.case.image_path)
+        )
+
     # ── OS handling ───────────────────────────────────────────────────────────
 
     def _start_os_probe(self):
+        """
+        Identify the loaded image and scope the ribbon to it.
+
+        Runs in two stages. The header sniff comes back almost immediately and
+        is acted on straight away, so an examiner opening a crash dump sees the
+        right plugin set before volatility3 has even started; the full profile
+        arrives afterwards and fills in the build details.
+        """
         image_path = self.case.image_path
         if not image_path or not os.path.exists(image_path):
             return
-        self._show_status("Identifying image operating system…")
-        probe = OsProbe(image_path, self.symbol_dirs, parent=self)
-        probe.detected.connect(lambda name: self.set_os(name))
-        probe.undetermined.connect(self._on_os_undetermined)
+        if self._os_probe is not None:
+            self._os_probe.cancel()
+            self._os_probe.wait(2000)
+
+        self._set_badge_probing()
+        self._show_status("Identifying the image…")
+
+        probe = ImageProbe(image_path, self.symbol_dirs, parent=self)
+        probe.sniffed.connect(self._on_sniffed)
+        probe.profiled.connect(self._on_profiled)
+        probe.note.connect(self._show_status)
         probe.finished.connect(lambda: setattr(self, "_os_probe", None))
         self._os_probe = probe
         probe.start()
 
-    def _on_os_undetermined(self, reason: str):
-        log.info("OS probe inconclusive: %s", reason)
-        self._show_status(
-            f"Could not identify the image OS ({reason}) — showing "
-            f"{OS_BADGES[self.current_os][1]} plugins. Change it under View."
-        )
+    def _on_sniffed(self, profile: ImageProfile):
+        """The instant verdict from the file header, before vol3 has run."""
+        if profile.os:
+            self.profile = profile
+            self.set_os(profile.os)
+            self._show_status(f"{profile.summary()} — confirming…")
+        elif profile.container:
+            self._show_status(
+                f"{profile.container} — identifying the operating system…"
+            )
 
-    def set_os(self, os_name: str, manual: bool = False):
-        if os_name not in OS_BADGES or os_name == self.current_os:
-            return
-        self.current_os = os_name
-        old = self.ribbon
-        self.ribbon = self._build_ribbon(os_name)
-        self.ribbon_host_layout.replaceWidget(old, self.ribbon)
-        old.deleteLater()
-        self._update_os_badge()
-        self.apply_theme()
-        if self.db and self.active_source_id and not manual:
+    def _on_profiled(self, profile: ImageProfile):
+        """The final verdict, with whatever detail volatility3 could give."""
+        self.profile = profile
+        if profile.os:
+            self.set_os(profile.os)
+        else:
+            self._update_os_badge()
+        self._refresh_image_facts()
+        if profile.confidence == "assumed":
+            self._show_status(
+                f"{profile.summary()}. Pick another OS under View if that is wrong."
+            )
+        else:
+            self._show_status(
+                f"{profile.summary()} — {self.ribbon.plugin_count()} plugins available."
+            )
+        if self.db and self.active_source_id and profile.os:
             try:
-                self.db.add_data_source(self.case.image_path, os_hint=os_name)
+                self.db.add_data_source(self.case.image_path, os_hint=profile.os)
                 self._refresh_case_tree()
             except Exception as exc:
                 log.debug("Could not record the detected OS: %s", exc)
-        label = OS_BADGES[os_name][1]
+
+    def set_os(self, os_name: str, manual: bool = False, quiet: bool = False):
+        """Scope the ribbon to `os_name`. Cheap and idempotent."""
+        if os_name not in OS_BADGES or os_name == self.current_os:
+            return
+        self.current_os = os_name
+        _icon, label = OS_BADGES[os_name]
+        self.ribbon.set_os(os_name, label)
+        self._update_os_badge()
+        if manual:
+            # A manual choice is a decision, not a detection; record it as one
+            # so the overview does not claim volatility3 concluded it.
+            self.profile = ImageProfile(
+                os=os_name, confidence="likely", method="chosen manually",
+                container=self.profile.container, details=self.profile.details,
+            )
+            self._refresh_image_facts()
+        if quiet:
+            return
         self._show_status(
-            f"Showing {label} plugins."
-            if manual else f"Detected {label} image — plugin ribbon updated."
+            f"Showing {label} plugins — {self.ribbon.plugin_count()} available."
         )
 
+    def _set_badge_probing(self):
+        self.os_badge.setText("⏳  Identifying…")
+        self.os_badge.setProperty("os", "")
+        self.os_badge.setProperty("probing", "true")
+        restyle(self.os_badge)
+
     def _update_os_badge(self):
-        icon, label, background, foreground = OS_BADGES[self.current_os]
-        self.os_badge.setText(f"{icon}  {label}")
-        self.os_badge.setStyleSheet(
-            f"background-color: {background}; color: {foreground};"
-            "border-radius: 4px; padding: 3px 10px; font-size: 11px; font-weight: 700;"
-        )
+        if not self.current_os:
+            self._set_badge_probing()
+            return
+        icon, label = OS_BADGES[self.current_os]
+        suffix = "?" if self.profile.confidence == "assumed" else ""
+        self.os_badge.setText(f"{icon}  {label}{suffix}")
+        self.os_badge.setToolTip(self.profile.summary() or f"{label} plugins")
+        self.os_badge.setProperty("os", self.current_os)
+        self.os_badge.setProperty("probing", "false")
+        restyle(self.os_badge)
 
     # ── Plugin execution ──────────────────────────────────────────────────────
 
@@ -692,9 +772,7 @@ class MainWindow(QMainWindow):
         self._panels[info.id] = panel
         panel.set_running(True)
 
-        button = self._plugin_buttons.get(info.id)
-        if button:
-            button.set_running(True)
+        self.ribbon.set_running(info.id, True)
 
         spec = RunSpec(
             image_path=self.case.image_path,
@@ -737,9 +815,7 @@ class MainWindow(QMainWindow):
                 except Exception as exc:
                     log.warning("Could not store results for %s: %s", plugin_id, exc)
 
-        button = self._plugin_buttons.get(plugin_id)
-        if button:
-            button.set_running(False)
+        self.ribbon.set_running(plugin_id, False)
 
         if runner:
             runner.wait(3000)
@@ -791,12 +867,10 @@ class MainWindow(QMainWindow):
         self._start_os_probe()
 
     def _set_image_label(self, path: str):
-        if path:
-            self.image_lbl.setText(os.path.basename(path))
-            self.image_lbl.setToolTip(path)
-        else:
-            self.image_lbl.setText("No image loaded")
-            self.image_lbl.setToolTip("")
+        self.image_lbl.setText(os.path.basename(path) if path else "No image loaded")
+        self.image_lbl.setToolTip(path)
+        self.image_lbl.setProperty("loaded", "true" if path else "false")
+        restyle(self.image_lbl)
 
     def _export_current(self):
         panel = self.tabs.currentWidget()
@@ -902,9 +976,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_registry(self):
         self.registry = PluginRegistry.load(refresh=True)
-        current = self.current_os
-        self.current_os = ""            # force the rebuild in set_os
-        self.set_os(current, manual=True)
+        self.ribbon.reload(self.registry)
+        self._refresh_image_facts()
         self._show_status(
             f"Plugin list refreshed — volatility3 {self.registry.vol_version}, "
             f"{len(self.registry.all())} plugins."
@@ -945,11 +1018,23 @@ class MainWindow(QMainWindow):
         self.apply_theme()
 
     def apply_theme(self):
-        QApplication.instance().setStyleSheet(DARK_THEME if self.is_dark else LIGHT_THEME)
+        QApplication.instance().setStyleSheet(build_theme(dark=self.is_dark))
         self.theme_btn.setText("Light" if self.is_dark else "Dark")
-        for button in self._plugin_buttons.values():
-            button.set_dark(self.is_dark)
+        # Tiles and badges are styled by property, so the new sheet reaches them
+        # without any per-widget work — but Qt needs telling to re-evaluate the
+        # property-driven rules.
         self._update_os_badge()
+        if getattr(self, "case_tree", None) is not None:
+            self.case_tree.apply_theme(self.is_dark)
+            self._refresh_case_tree()
+        # Item views paint some colours with a brush, which no stylesheet can
+        # reach; those have to be handed the new palette explicitly.
+        for index in range(self.tabs.count()):
+            widget = self.tabs.widget(index)
+            if isinstance(widget, ResultPanel):
+                widget.apply_theme(self.is_dark)
+        self.case.is_dark = self.is_dark
+        self.case.save()
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
 

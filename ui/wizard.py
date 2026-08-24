@@ -7,8 +7,11 @@ from PyQt6.QtWidgets import (
     QApplication, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QFont, QIcon, QPalette, QColor
-from ui.theme import DARK_THEME, LIGHT_THEME
+from PyQt6.QtGui import (
+    QDragEnterEvent, QDropEvent, QFont, QIcon, QPainter, QPalette, QColor,
+)
+from PyQt6.QtWidgets import QStyle, QStyleOption
+from ui.theme import build as build_theme, restyle
 from core.case import Case, CaseError, remember_case
 from core.hash_worker import HashWorker
 
@@ -33,13 +36,12 @@ class StepIndicator(QWidget):
             circle = QLabel(str(i + 1))
             circle.setFixedSize(32, 32)
             circle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            circle.setObjectName(f"step_circle_{i}")
-            circle.setStyleSheet(self._circle_style(i))
+            circle.setObjectName("stepCircle")
             self.circles.append(circle)
 
             lbl = QLabel(name)
+            lbl.setObjectName("stepLabel")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet("font-size: 11px; color: #8b949e; background: transparent;")
             self.labels.append(lbl)
 
             col.addWidget(circle)
@@ -55,21 +57,23 @@ class StepIndicator(QWidget):
                 line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 layout.addWidget(line)
 
-    def _circle_style(self, idx):
+    def _state(self, idx: str) -> str:
         if idx < self.current:
-            return ("QLabel { background-color: #238636; color: white; "
-                    "border-radius: 16px; font-weight: bold; font-size: 13px; }")
-        elif idx == self.current:
-            return ("QLabel { background-color: #1f6feb; color: white; "
-                    "border-radius: 16px; font-weight: bold; font-size: 13px; }")
-        else:
-            return ("QLabel { background-color: #21262d; color: #8b949e; "
-                    "border-radius: 16px; font-weight: bold; font-size: 13px; }")
+            return "done"
+        return "active" if idx == self.current else "pending"
 
     def set_step(self, idx):
+        """
+        Colour is a property here, not an inline stylesheet: the steps have to
+        follow the theme, and an inline sheet outranks the application one.
+        """
         self.current = idx
         for i, circle in enumerate(self.circles):
-            circle.setStyleSheet(self._circle_style(i))
+            state = self._state(i)
+            circle.setProperty("state", state)
+            restyle(circle)
+            self.labels[i].setProperty("state", state)
+            restyle(self.labels[i])
 
 
 class DropZone(QWidget):
@@ -89,24 +93,20 @@ class DropZone(QWidget):
         layout.setSpacing(10)
 
         self.icon_lbl = QLabel("🗂️")
+        self.icon_lbl.setObjectName("dropIcon")
         self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.icon_lbl.setStyleSheet("font-size: 42px; background: transparent;")
 
         self.main_lbl = QLabel("Drag & Drop Memory Image Here")
+        self.main_lbl.setObjectName("dropTitle")
         self.main_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.main_lbl.setStyleSheet(
-            "font-size: 15px; font-weight: 600; color: #58a6ff; background: transparent;"
-        )
 
         self.sub_lbl = QLabel("or click to browse files (.raw, .mem, .vmem, .dmp, .img)")
+        self.sub_lbl.setObjectName("dropSubtitle")
         self.sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.sub_lbl.setStyleSheet("font-size: 11px; color: #8b949e; background: transparent;")
 
         self.file_lbl = QLabel("")
+        self.file_lbl.setObjectName("dropFile")
         self.file_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.file_lbl.setStyleSheet(
-            "font-size: 12px; color: #3fb950; font-weight: 600; background: transparent;"
-        )
         self.file_lbl.setWordWrap(True)
 
         layout.addWidget(self.icon_lbl)
@@ -115,30 +115,18 @@ class DropZone(QWidget):
         layout.addWidget(self.file_lbl)
 
     def _update_style(self, hover=False):
-        if self.file_path:
-            self.setStyleSheet("""
-                QWidget {
-                    border: 2px solid #3fb950;
-                    border-radius: 10px;
-                    background-color: #0f2419;
-                }
-            """)
-        elif hover:
-            self.setStyleSheet("""
-                QWidget {
-                    border: 2px dashed #58a6ff;
-                    border-radius: 10px;
-                    background-color: #0d1f33;
-                }
-            """)
-        else:
-            self.setStyleSheet("""
-                QWidget {
-                    border: 2px dashed #30363d;
-                    border-radius: 10px;
-                    background-color: #161b22;
-                }
-            """)
+        state = "loaded" if self.file_path else ("hover" if hover else "idle")
+        self.setProperty("state", state)
+        restyle(self)
+
+    def paintEvent(self, event):
+        """QWidget subclasses do not paint a stylesheet background on their own."""
+        option = QStyleOption()
+        option.initFrom(self)
+        painter = QPainter(self)
+        self.style().drawPrimitive(
+            QStyle.PrimitiveElement.PE_Widget, option, painter, self
+        )
 
     def set_file(self, path):
         self.file_path = path
@@ -207,11 +195,9 @@ class CaseWizard(QDialog):
         header_layout.setContentsMargins(28, 0, 28, 0)
 
         title_lbl = QLabel("DumpScope")
-        title_lbl.setStyleSheet(
-            "font-size: 24px; font-weight: 800; color: #58a6ff; background: transparent; letter-spacing: 1px;"
-        )
+        title_lbl.setObjectName("wizardTitle")
         subtitle = QLabel("Memory Forensics Platform")
-        subtitle.setStyleSheet("font-size: 12px; color: #8b949e; background: transparent;")
+        subtitle.setObjectName("wizardSubtitle")
 
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
@@ -270,7 +256,7 @@ class CaseWizard(QDialog):
         self.finish_btn.setEnabled(False)
 
         self.page_lbl = QLabel("Step 1 of 3")
-        self.page_lbl.setStyleSheet("color: #8b949e; background: transparent;")
+        self.page_lbl.setObjectName("fieldHint")
 
         footer_layout.addWidget(self.back_btn)
         footer_layout.addStretch()
@@ -286,16 +272,15 @@ class CaseWizard(QDialog):
 
     def _section_label(self, text):
         lbl = QLabel(text)
-        lbl.setStyleSheet(
-            "font-size: 17px; font-weight: 700; color: #58a6ff; "
-            "background: transparent; margin-bottom: 4px;"
-        )
+        lbl.setObjectName("dialogHeading")
         return lbl
 
     def _field_label(self, text, required=False):
+        # The asterisk keeps its own colour: it means "required" in every
+        # palette, and it is the only literal colour left in this file.
         suffix = "  <span style='color:#f85149;'>*</span>" if required else ""
         lbl = QLabel(f"{text}{suffix}")
-        lbl.setStyleSheet("color: #8b949e; background: transparent; font-size: 12px;")
+        lbl.setObjectName("fieldHint")
         return lbl
 
     def _build_case_page(self):
@@ -343,7 +328,7 @@ class CaseWizard(QDialog):
         scroll_layout.addLayout(grid)
 
         req_note = QLabel("* Required fields")
-        req_note.setStyleSheet("color: #f85149; font-size: 11px; background: transparent;")
+        req_note.setObjectName("requiredNote")
         scroll_layout.addWidget(req_note)
         scroll_layout.addStretch()
         return w
@@ -357,7 +342,7 @@ class CaseWizard(QDialog):
         layout.addWidget(self._section_label("Examiner Information"))
 
         opt_lbl = QLabel("All fields are optional.")
-        opt_lbl.setStyleSheet("color: #8b949e; font-size: 12px; background: transparent; margin-bottom: 4px;")
+        opt_lbl.setObjectName("fieldHint")
         layout.addWidget(opt_lbl)
 
         grid = QGridLayout()
@@ -418,7 +403,7 @@ class CaseWizard(QDialog):
         self.hash_progress.setFixedHeight(6)
 
         self.hash_status = QLabel("Load a memory image to compute hashes.")
-        self.hash_status.setStyleSheet("color: #8b949e; font-size: 11px; background: transparent;")
+        self.hash_status.setObjectName("fieldHint")
 
         self.md5_edit = QLineEdit()
         self.md5_edit.setReadOnly(True)
@@ -554,21 +539,5 @@ class CaseWizard(QDialog):
         self.apply_theme()
 
     def apply_theme(self):
-        QApplication.instance().setStyleSheet(
-            DARK_THEME if self.is_dark else LIGHT_THEME
-        )
+        QApplication.instance().setStyleSheet(build_theme(dark=self.is_dark))
         self.theme_btn.setText("☀️  Light" if self.is_dark else "🌙  Dark")
-        if self.is_dark:
-            self.setStyleSheet(
-                "QWidget#wizardHeader { background-color: #161b22; border-bottom: 1px solid #30363d; }"
-                "QWidget#stepContainer { background-color: #0d1117; }"
-                "QFrame#stepLine { background-color: #30363d; }"
-                "QWidget#wizardFooter { background-color: #161b22; border-top: 1px solid #30363d; }"
-            )
-        else:
-            self.setStyleSheet(
-                "QWidget#wizardHeader { background-color: #f6f8fa; border-bottom: 1px solid #d0d7de; }"
-                "QWidget#stepContainer { background-color: #ffffff; }"
-                "QFrame#stepLine { background-color: #d0d7de; }"
-                "QWidget#wizardFooter { background-color: #f6f8fa; border-top: 1px solid #d0d7de; }"
-            )

@@ -15,10 +15,11 @@ from datetime import datetime
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
+    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
+from ui.theme import build as build_theme
 from core.case import Case, CaseError, forget_case, load_recent, remember_case
 
 
@@ -64,6 +65,10 @@ class CaseManager(QDialog):
         self.setMinimumSize(880, 560)
         self._build()
         self._load_recent()
+        # The launcher opens before any main window exists, so nothing else has
+        # set an application stylesheet yet — without this the first screen an
+        # examiner sees is the only unthemed one in the application.
+        QApplication.instance().setStyleSheet(build_theme(dark=self.is_dark))
 
     # ── Construction ──────────────────────────────────────────────────────────
 

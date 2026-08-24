@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ui.result_model import ResultFilterProxy, ResultTableModel
+from ui.theme import restyle
 
 # Sensible starting widths for columns vol3 emits constantly. Anything not
 # listed is sized from its header text, bounded so one wide column cannot push
@@ -116,21 +117,21 @@ class ResultPanel(QWidget):
         self.regex_chk.toggled.connect(lambda _: self._apply_filter(self.filter_box.text()))
 
         self.cancel_btn = QPushButton("Stop")
-        self.cancel_btn.setFixedSize(58, 28)
+        self.cancel_btn.setFixedSize(66, 28)
         self.cancel_btn.setObjectName("dangerButton")
         self.cancel_btn.clicked.connect(self._on_cancel)
 
         self.view_btn = QPushButton("Log")
-        self.view_btn.setFixedSize(58, 28)
+        self.view_btn.setFixedSize(62, 28)
         self.view_btn.setCheckable(True)
         self.view_btn.toggled.connect(self._toggle_view)
 
         export_btn = QPushButton("Export")
-        export_btn.setFixedSize(70, 28)
+        export_btn.setFixedSize(78, 28)
         export_btn.clicked.connect(self.export_dialog)
 
         copy_btn = QPushButton("Copy")
-        copy_btn.setFixedSize(58, 28)
+        copy_btn.setFixedSize(66, 28)
         copy_btn.clicked.connect(self.copy_visible)
 
         row.addWidget(self.status_dot)
@@ -161,7 +162,7 @@ class ResultPanel(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.verticalHeader().setDefaultSectionSize(23)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
@@ -195,6 +196,10 @@ class ResultPanel(QWidget):
         self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.log_view.setMaximumBlockCount(5000)
         return self.log_view
+
+    def apply_theme(self, dark: bool):
+        """Pass the palette down to the model, which paints with brushes."""
+        self.model.apply_theme(dark)
 
     # ── Streaming input ───────────────────────────────────────────────────────
 
@@ -261,9 +266,7 @@ class ResultPanel(QWidget):
         glyphs = {"running": "◉", "done": "●", "error": "✕", "cancelled": "◌"}
         self.status_dot.setText(glyphs.get(state, "●"))
         self.status_dot.setProperty("state", state)
-        # Re-polish so the stylesheet's [state=...] selector takes effect.
-        self.status_dot.style().unpolish(self.status_dot)
-        self.status_dot.style().polish(self.status_dot)
+        restyle(self.status_dot)     # [state=…] rules need an explicit repolish
 
     def _on_cancel(self):
         self.cancel_btn.setEnabled(False)
@@ -276,9 +279,8 @@ class ResultPanel(QWidget):
         use_regex = self.regex_chk.isChecked()
         self.proxy.set_filter(text, use_regex=use_regex)
         invalid = use_regex and text.strip() and not self.proxy.filter_is_valid_regex
-        self.filter_box.setProperty("invalid", bool(invalid))
-        self.filter_box.style().unpolish(self.filter_box)
-        self.filter_box.style().polish(self.filter_box)
+        self.filter_box.setProperty("invalid", "true" if invalid else "false")
+        restyle(self.filter_box)
         self._update_row_count()
 
     def _toggle_view(self, checked: bool):

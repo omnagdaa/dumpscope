@@ -18,6 +18,7 @@ import os
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont
+from ui.theme import palette
 from PyQt6.QtWidgets import (
     QAbstractItemView, QMenu, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -56,6 +57,10 @@ class CaseTree(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._active_source_id: int | None = None
+        # Placeholder rows are painted with a brush, not a stylesheet, so the
+        # colour has to be read out of the palette rather than declared in QSS.
+        self._faint = QColor(palette(dark=True)["text_faint"])
+        self._danger = QColor(palette(dark=True)["danger"])
         self._build()
 
     def _build(self):
@@ -128,7 +133,7 @@ class CaseTree(QWidget):
             item.setToolTip(0, source["path"] + "\n" + " · ".join(details))
 
             if missing:
-                item.setForeground(0, QBrush(QColor("#f85149")))
+                item.setForeground(0, QBrush(self._danger))
             if source["id"] == self._active_source_id:
                 font = item.font(0)
                 font.setBold(True)
@@ -138,7 +143,7 @@ class CaseTree(QWidget):
         if not sources:
             placeholder = QTreeWidgetItem(self.sources_group, ["No image loaded"])
             placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            placeholder.setForeground(0, QBrush(QColor("#6e7681")))
+            placeholder.setForeground(0, QBrush(self._faint))
 
     def _fill_results(self, results: list[dict]):
         self._clear(self.results_group)
@@ -160,7 +165,7 @@ class CaseTree(QWidget):
         if not results:
             placeholder = QTreeWidgetItem(self.results_group, ["Nothing saved yet"])
             placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            placeholder.setForeground(0, QBrush(QColor("#6e7681")))
+            placeholder.setForeground(0, QBrush(self._faint))
 
     def _fill_bookmarks(self, bookmarks: list[dict]):
         self._clear(self.bookmarks_group)
@@ -186,7 +191,12 @@ class CaseTree(QWidget):
         if not bookmarks:
             placeholder = QTreeWidgetItem(self.bookmarks_group, ["No bookmarks"])
             placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            placeholder.setForeground(0, QBrush(QColor("#6e7681")))
+            placeholder.setForeground(0, QBrush(self._faint))
+
+    def apply_theme(self, dark: bool):
+        """Follow the application palette for the item colours QSS cannot reach."""
+        self._faint = QColor(palette(dark=dark)["text_faint"])
+        self._danger = QColor(palette(dark=dark)["danger"])
 
     # ── Interaction ───────────────────────────────────────────────────────────
 

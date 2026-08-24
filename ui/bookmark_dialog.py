@@ -10,6 +10,7 @@ free-text note.
 from __future__ import annotations
 
 from PyQt6.QtGui import QColor, QIcon, QPixmap
+from ui.theme import palette
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
     QPlainTextEdit, QVBoxLayout,
@@ -46,7 +47,7 @@ class BookmarkDialog(QDialog):
         self.tag_combo.addItem("(no tag)", "")
         for tag in tags:
             pixmap = QPixmap(12, 12)
-            pixmap.fill(QColor(tag.get("color") or "#58a6ff"))
+            pixmap.fill(QColor(tag.get("color") or palette()["accent"]))
             self.tag_combo.addItem(QIcon(pixmap), tag["name"], tag["name"])
 
         self.notes_edit = QPlainTextEdit()

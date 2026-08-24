@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QComboBox, QTextEdit, QGroupBox, QFileDialog,
     QListWidget, QListWidgetItem, QWidget
 )
+from ui.theme import restyle
 from PyQt6.QtCore import Qt
 from core.symbol_downloader import SymbolDownloader
 
@@ -31,7 +32,7 @@ class SymbolDialog(QDialog):
 
         self.sym_status = QLabel("")
         self.sym_status.setWordWrap(True)
-        self.sym_status.setStyleSheet("font-size: 12px;")
+        self.sym_status.setObjectName("fieldHint")
 
         row = QHBoxLayout()
         self.pack_combo = QComboBox()
@@ -76,7 +77,7 @@ class SymbolDialog(QDialog):
         yara_info = QLabel(
             f"Place .yar / .yara rule files in:\n  {self.yara_dir}"
         )
-        yara_info.setStyleSheet("color: #8b949e; font-size: 12px;")
+        yara_info.setObjectName("fieldHint")
 
         yara_btn_row = QHBoxLayout()
         open_yara_btn = QPushButton("📂  Open YARA Folder")
@@ -124,12 +125,14 @@ class SymbolDialog(QDialog):
             self.sym_status.setText(
                 f"✓  Installed packs: {', '.join(packs_found)}"
             )
-            self.sym_status.setStyleSheet("color: #3fb950; font-size: 12px;")
+            self.sym_status.setObjectName("hintOk")
+            restyle(self.sym_status)
         else:
             self.sym_status.setText(
                 "⚠  No symbol packs found. Download at least 'windows' to analyse Windows memory dumps."
             )
-            self.sym_status.setStyleSheet("color: #f0883e; font-size: 12px;")
+            self.sym_status.setObjectName("hintWarn")
+            restyle(self.sym_status)
 
         self._refresh_yara()
 

@@ -337,66 +337,8 @@ class VolatilityRunner(QThread):
         )
 
 
-class OsProbe(QThread):
-    """
-    Determines an image's OS up front by running ``banners.Banners``.
-
-    The old behaviour inferred the OS from the first plugin's output, which
-    meant the ribbon showed Windows plugins for a Linux image until something
-    had already been run against it — and whatever was run first was, by
-    definition, chosen from the wrong ribbon.
-
-    Emits `detected` with "windows" / "linux" / "mac", or `undetermined` when
-    the banners give nothing away.
-    """
-
-    detected      = pyqtSignal(str)
-    undetermined  = pyqtSignal(str)
-
-    def __init__(self, image_path: str, symbol_dirs: list[str] | None = None, parent=None):
-        super().__init__(parent)
-        self.image_path = image_path
-        self.symbol_dirs = symbol_dirs or []
-        self._proc: subprocess.Popen | None = None
-
-    def cancel(self):
-        proc = self._proc
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-
-    def run(self):
-        command = (
-            find_vol3_command()
-            + ["-q", "-r", "csv", "-f", os.path.abspath(self.image_path), "banners.Banners"]
-        )
-        try:
-            self._proc = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                env=build_environment(self.symbol_dirs),
-                creationflags=_creation_flags(),
-            )
-            # Bounded: a corrupt or unsupported image can make banner scanning
-            # run for a very long time, and this is only a UI convenience.
-            stdout, stderr = self._proc.communicate(timeout=240)
-        except subprocess.TimeoutExpired:
-            self.cancel()
-            self.undetermined.emit("Banner scan timed out.")
-            return
-        except Exception as exc:
-            self.undetermined.emit(f"Banner scan failed: {exc}")
-            return
-        finally:
-            self._proc = None
-
-        guess = detect_os_from_banner(stdout or "")
-        if guess:
-            self.detected.emit(guess)
-        else:
-            self.undetermined.emit(
-                (stderr or "").strip().splitlines()[-1]
-                if (stderr or "").strip() else "No recognisable banner found."
-            )
+# OS detection used to live here as OsProbe, which ran banners.Banners and
+# treated an empty result as failure. That is the guaranteed outcome on a
+# Windows image, since banners only looks for Linux and Mac kernels. It now
+# lives in core.os_detect, which sniffs the container header first and only
+# falls back to a full banner scan for images that are not Windows.
