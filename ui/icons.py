@@ -32,6 +32,7 @@ _GLYPHS: dict[str, str] = {
     "link": '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7L11.8 5.2"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
     "badge": '<rect x="2.5" y="4.5" width="19" height="15" rx="2"/><circle cx="16" cy="10.5" r="2"/><path d="M13.2 15.5a3 3 0 0 1 5.6 0M6 9.5h4M6 13.5h2.5"/>',
     "lock": '<rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M7.5 10.5V7a4.5 4.5 0 0 1 9 0v3.5"/>',
+    "unlock": '<rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M7.5 10.5V7a4.5 4.5 0 0 1 8.9-1"/>',
     "key": '<circle cx="7.5" cy="16" r="4.5"/><path d="M10.8 12.8 21 3"/><path d="M17.5 6.5 20 9"/>',
     "braces": '<path d="M8 3a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2"/><path d="M16 3a2 2 0 0 1 2 2v4a2 2 0 0 0 2 2 2 2 0 0 0-2 2v4a2 2 0 0 1-2 2"/>',
     "network": '<rect x="2.5" y="15.5" width="6" height="6" rx="1"/><rect x="15.5" y="15.5" width="6" height="6" rx="1"/><rect x="9" y="2.5" width="6" height="6" rx="1"/><path d="M5.5 15.5v-3h13v3M12 8.5v4"/>',
@@ -53,6 +54,7 @@ _GLYPHS: dict[str, str] = {
     "sun": '<circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/>',
     "moon": '<path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/>',
     "command": '<path d="M8.5 3.5A2.5 2.5 0 1 1 6 6v12a2.5 2.5 0 1 1 2.5-2.5h7A2.5 2.5 0 1 1 18 18V6a2.5 2.5 0 1 1-2.5 2.5z"/>',
+    "cross": '<path d="M6 6l12 12M18 6L6 18"/>',
     "chevron": '<path d="M9 6l6 6-6 6"/>',
     "target": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.3"/>',
     "info": '<circle cx="12" cy="12" r="9"/><path d="M12 16.5v-5M12 7.8h.01"/>',
@@ -96,7 +98,7 @@ _FROM_EMOJI: dict[str, str] = {
     "🔀": "shuffle", "🕳": "target", "🗝": "key",
     "🧬": "layers", "🧵": "activity", "🪝": "link", "🪢": "link",
     "🪤": "target", "🫥": "eye", "🫧": "database", "🧮": "chip",
-    "🧿": "shield", "🩹": "wrench",
+    "🧿": "shield", "🩹": "wrench", "🔓": "unlock", "🎫": "badge",
     # OS badges.
     "🪟": "window", "🐧": "penguin", "🍎": "apple", "🔬": "flask",
 }

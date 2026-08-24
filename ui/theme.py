@@ -268,13 +268,14 @@ QTabBar::tab {
 }
 QTabBar::tab:selected { color: $text; border-bottom-color: $accent; }
 QTabBar::tab:hover:!selected { color: $text; background-color: $surface_alt; }
-QTabBar::close-button {
-    image: none;
+QPushButton#tabCloseButton {
+    border: none;
     background: transparent;
-    border-radius: 6px;
-    subcontrol-position: right;
+    border-radius: 4px;
+    padding: 0;
+    margin: 0;
 }
-QTabBar::close-button:hover { background: $danger; }
+QPushButton#tabCloseButton:hover { background-color: $surface_high; }
 
 /* ── Item views ────────────────────────────────────────────────────────── */
 /* QTableView is listed explicitly: it is the results grid, and it is NOT a

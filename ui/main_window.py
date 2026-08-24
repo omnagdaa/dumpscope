@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
     QMessageBox,
-    QPushButton, QScrollArea, QSplitter, QStatusBar, QTabWidget, QTextEdit,
+    QPushButton, QScrollArea, QSplitter, QStatusBar, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
@@ -36,6 +36,7 @@ from ui.plugin_args_dialog import PluginArgsDialog
 from ui.notifications import Notifier
 from ui.plugin_ribbon import PluginRibbon
 from ui.result_panel import ResultPanel
+from ui.result_tabs import ResultTabs
 from ui import icons
 from ui.theme import (
     BASE_FONT_SIZE, build as build_theme, fonts as theme_fonts, palette, restyle,
@@ -190,13 +191,13 @@ class MainWindow(QMainWindow):
         # probe cannot report at all until an image is loaded.
         self.set_os(DEFAULT_OS, quiet=True)
 
-        self.tabs = QTabWidget()
-        self.tabs.setTabsClosable(True)
-        self.tabs.setMovable(True)
+        self.tabs = ResultTabs()
         self.tabs.tabCloseRequested.connect(self._close_tab)
-        self.tabs.addTab(self._build_overview_tab(), "Case")
+        # The Case tab is pinned and cannot be closed: it is the case's own
+        # surface, not a throwaway result.
+        self.tabs.add_result_tab(self._build_overview_tab(), "Case",
+                                 closable=False, pinned=True)
         self._refresh_image_facts()
-        self.tabs.tabBar().setTabButton(0, self.tabs.tabBar().ButtonPosition.RightSide, None)
         root.addWidget(self.tabs, 1)
 
         self.status_bar = QStatusBar()
@@ -402,7 +403,7 @@ class MainWindow(QMainWindow):
         panel.set_finished(0)
         panel.append_log(f"Stored result from {stored.get('created_at', 'an earlier run')}.")
 
-        index = self.tabs.addTab(panel, f"{short} (saved)")
+        index = self.tabs.add_result_tab(panel, f"{short} (saved)")
         self.tabs.setCurrentIndex(index)
         self._show_status(f"Opened stored {short} — {len(stored['rows']):,} rows.")
 
@@ -530,6 +531,10 @@ class MainWindow(QMainWindow):
         symbols_action = QAction("Symbols && YARA…", self)
         symbols_action.triggered.connect(self._open_symbol_manager)
         tools_menu.addAction(symbols_action)
+
+        creds_action = QAction("Extract Credentials", self)
+        creds_action.triggered.connect(self._sweep_credentials)
+        tools_menu.addAction(creds_action)
 
         refresh_action = QAction("Refresh Plugin List", self)
         refresh_action.triggered.connect(self._refresh_registry)
@@ -1006,7 +1011,7 @@ class MainWindow(QMainWindow):
         panel.cancel_requested.connect(lambda key=info.id: self._cancel_run(key))
         self._wire_panel(panel)
 
-        index = self.tabs.addTab(panel, info.short_name)
+        index = self.tabs.add_result_tab(panel, info.short_name)
         self.tabs.setCurrentIndex(index)
         self._panels[info.id] = panel
         panel.set_running(True)
@@ -1400,6 +1405,56 @@ class MainWindow(QMainWindow):
                 return panel
         return None
 
+    #: The registry- and memory-derived credential plugins, run together by the
+    #: credential sweep. Each is skipped silently if this volatility3 lacks it,
+    #: so a partial installation still runs what it has.
+    _CREDENTIAL_PLUGINS = (
+        "windows.hashdump.Hashdump",
+        "windows.lsadump.Lsadump",
+        "windows.cachedump.Cachedump",
+    )
+
+    def _sweep_credentials(self):
+        """
+        Run every credential plugin at once, and offer to dump lsass memory.
+
+        hashdump reads the NTLM hashes out of the SAM, lsadump the LSA secrets,
+        cachedump the cached domain logons. None of them recovers a plaintext
+        password — that comes from cracking the hashes, or from running a
+        dumped lsass through pypykatz — so the status makes that explicit rather
+        than implying passwords fall out of a button.
+        """
+        if not self.case.image_path or not os.path.exists(self.case.image_path):
+            QMessageBox.warning(self, "No Image Loaded",
+                                "Load a Windows memory image first.")
+            return
+        if self.current_os != "windows":
+            QMessageBox.information(
+                self, "Windows Only",
+                "The credential plugins read Windows registry and LSASS "
+                "structures; they do not apply to this image.",
+            )
+            return
+
+        available = [pid for pid in self._CREDENTIAL_PLUGINS
+                     if self.registry.get(pid) is not None]
+        if not available:
+            QMessageBox.warning(
+                self, "Credential Plugins Missing",
+                "This volatility3 has none of the credential plugins. They need "
+                "the pycryptodome package; without it hashdump, lsadump and "
+                "cachedump do not load.",
+            )
+            return
+
+        for plugin_id in available:
+            if plugin_id not in self._runners:
+                self._on_plugin_clicked(plugin_id)
+        self._show_status(
+            f"Running {len(available)} credential plugin(s). These yield hashes "
+            "and secrets, not plaintext passwords — crack the hashes offline."
+        )
+
     # ── Extraction ────────────────────────────────────────────────────────────
 
     #: What each extraction runs. vol3 writes the files itself; the table each
@@ -1461,7 +1516,16 @@ class MainWindow(QMainWindow):
         panel.cancel_requested.connect(lambda key=run_key: self._cancel_run(key))
         self._wire_panel(panel)
         panel.append_log(f"Extracting {what} for PID {pid} into {target}")
-        index = self.tabs.addTab(panel, f"{title} {pid}")
+        if payload.get("__lsass__"):
+            panel.append_log(
+                "This is the lsass process memory. volatility3 does not recover "
+                "plaintext passwords itself; run the written file through "
+                "pypykatz (`pypykatz lsa minidump <file>`) or an equivalent to "
+                "pull credentials out of it. For registry-derived hashes, use "
+                "the Credentials plugins (Password Hashes, LSA Secrets, Cached "
+                "Domain) instead."
+            )
+        index = self.tabs.add_result_tab(panel, f"{title} {pid}")
         self.tabs.setCurrentIndex(index)
         self._panels[run_key] = panel
         panel.set_running(True)
@@ -1668,6 +1732,9 @@ class MainWindow(QMainWindow):
         widget = self.tabs.widget(index)
         if not isinstance(widget, ResultPanel):
             return
+        if self.tabs.is_pinned(widget):
+            self._show_status("This tab is pinned — unpin it first to close it.")
+            return
         plugin_id = getattr(widget, "run_key", "") or widget.plugin_id
         if plugin_id in self._runners:
             answer = QMessageBox.question(
@@ -1701,6 +1768,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "notifier", None) is not None:
             self.notifier.set_dark(self.is_dark)
         self.ribbon.repaint_glyphs()
+        self.tabs.apply_theme(self.is_dark)
         if getattr(self, "case_tree", None) is not None:
             self.case_tree.apply_theme(self.is_dark)
             self._refresh_case_tree()
@@ -1867,6 +1935,9 @@ class MainWindow(QMainWindow):
                     glyph="target", keywords="detect os profile probe"),
             Command("Compute Hashes", self._hash_active_source, group="Image",
                     glyph="key", keywords="md5 sha256 integrity"),
+            Command("Extract Credentials (hashes, LSA, cached)",
+                    self._sweep_credentials, group="Tools", glyph="unlock",
+                    keywords="password lsass hashdump lsadump cachedump ntlm sam"),
             Command("Symbols & YARA…", self._open_symbol_manager, group="Tools",
                     glyph="braces", keywords="isf pdb rules download"),
             Command("Refresh Plugin List", self._refresh_registry, group="Tools",

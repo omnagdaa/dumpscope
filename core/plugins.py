@@ -218,6 +218,7 @@ CATEGORIES: tuple[tuple[str, str], ...] = (
     ("Memory",    "#e0a06a"),
     ("Registry",  "#b39ddb"),
     ("System",    "#d9c07a"),
+    ("Credentials", "#d98fb0"),
     ("Malware",   "#e0796f"),
 )
 
@@ -264,6 +265,10 @@ _CATALOG: dict[str, tuple[tuple[str, str, str, str], ...]] = {
         ("windows.unloadedmodules.UnloadedModules",   "Unloaded Mods",  "📤", "System"),
         ("windows.callbacks.Callbacks",               "Callbacks",      "📞", "System"),
         ("windows.timers.Timers",                     "Timers",         "⏱", "System"),
+
+        ("windows.hashdump.Hashdump",                 "Password Hashes", "🔓", "Credentials"),
+        ("windows.lsadump.Lsadump",                   "LSA Secrets",     "🗝", "Credentials"),
+        ("windows.cachedump.Cachedump",               "Cached Domain",   "🎫", "Credentials"),
 
         ("windows.malware.malfind.Malfind",           "Malfind",        "🦠", "Malware"),
         ("windows.malware.psxview.PsXView",           "PsXView",        "👻", "Malware"),

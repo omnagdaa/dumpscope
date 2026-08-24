@@ -350,6 +350,16 @@ class ResultPanel(QWidget):
         pid = self._pid_of(row)
         if pid:
             menu.addSeparator()
+            # lsass holds credential material in memory; dumping it for offline
+            # pypykatz/mimikatz is the reason an examiner reaches for this, so it
+            # is offered directly rather than buried under a generic PID.
+            if self._is_lsass(row):
+                menu.addAction(
+                    f"Dump LSASS Memory (PID {pid}) for credential recovery",
+                    lambda p=pid: self.dump_requested.emit(
+                        {**row, "__dump__": "memory", "__pid__": p,
+                         "__plugin__": self.plugin_id, "__lsass__": True}),
+                )
             extract = menu.addMenu(f"Extract from PID {pid}")
             for label, action in (("Process Executable", "process"),
                                   ("Process Memory (full)", "memory"),
@@ -384,6 +394,13 @@ class ResultPanel(QWidget):
 
     def _emit_row(self, signal, row: dict):
         signal.emit({**row, "__plugin__": self.plugin_id or self.plugin_name})
+
+    @staticmethod
+    def _is_lsass(row: dict) -> bool:
+        for name in ("ImageFileName", "Process", "Name", "COMM"):
+            if str(row.get(name) or "").strip().lower() == "lsass.exe":
+                return True
+        return False
 
     def _pid_of(self, row: dict) -> str:
         """
