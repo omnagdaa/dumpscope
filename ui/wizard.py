@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QFont, QIcon, QPalette, QColor
 from ui.theme import DARK_THEME, LIGHT_THEME
+from core.case import Case, CaseError, remember_case
 from core.hash_worker import HashWorker
 
 
@@ -508,22 +509,42 @@ class CaseWizard(QDialog):
         return True
 
     def finish(self):
-        self._case_data = {
-            "case_name": self.case_name.text().strip(),
-            "case_number": self.case_number.text().strip(),
-            "date_time": self.case_date.text().strip(),
-            "base_dir": self.base_dir.text().strip(),
-            "examiner_id": self.exam_id.text().strip(),
-            "examiner_name": self.exam_name.text().strip(),
-            "examiner_email": self.exam_email.text().strip(),
-            "examiner_phone": self.exam_phone.text().strip(),
-            "notes": self.notes.toPlainText().strip(),
-            "image_path": self.drop_zone.file_path or "",
-            "md5": self.md5_edit.text(),
-            "sha256": self.sha256_edit.text(),
-            "is_dark": self.is_dark,
-        }
+        """
+        Create the case folder, then close.
+
+        Creation happens here rather than after the dialog closes so a failure —
+        an unwritable parent directory, a case of this name already there — can
+        be reported while the fields are still on screen and editable.
+        """
+        parent_dir = self.base_dir.text().strip()
+        try:
+            self._case = Case.create(
+                parent_dir,
+                self.case_name.text().strip(),
+                case_number=self.case_number.text().strip(),
+                date_time=self.case_date.text().strip(),
+                examiner_id=self.exam_id.text().strip(),
+                examiner_name=self.exam_name.text().strip(),
+                examiner_email=self.exam_email.text().strip(),
+                examiner_phone=self.exam_phone.text().strip(),
+                notes=self.notes.toPlainText().strip(),
+                image_path=self.drop_zone.file_path or "",
+                md5=self.md5_edit.text(),
+                sha256=self.sha256_edit.text(),
+                is_dark=self.is_dark,
+            )
+        except CaseError as exc:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Could Not Create Case", str(exc))
+            return
+
+        remember_case(self._case)
+        self._case_data = self._case.to_dict()
         self.accept()
+
+    def get_case(self):
+        """The Case created by this wizard; valid only after it was accepted."""
+        return getattr(self, "_case", None)
 
     def get_case_data(self):
         return self._case_data

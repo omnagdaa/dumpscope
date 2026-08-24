@@ -1,83 +1,116 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton
+"""
+A single tile on the plugin ribbon.
+
+Colour handling here is still inline rather than stylesheet-driven; that gets
+folded into the theme system along with the rest of the hardcoded palette.
+"""
+
+from __future__ import annotations
+
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+from core.plugins import PluginInfo
 
 
 class PluginButton(QWidget):
-    clicked = pyqtSignal(str, str)   # plugin_id, display_name
+    """Emits the plugin id when clicked, unless a run is already in flight."""
 
-    def __init__(self, plugin_id: str, display_name: str, icon: str,
-                 category_color: str = "#58a6ff", parent=None):
+    clicked = pyqtSignal(str)
+
+    def __init__(self, info: PluginInfo, dark: bool = True, parent=None):
         super().__init__(parent)
-        self.plugin_id = plugin_id
-        self.display_name = display_name
-        self.icon = icon
-        self.category_color = category_color
+        self.info = info
+        self._dark = dark
         self._running = False
         self._build()
-        self.setFixedSize(110, 100)
+        self.setFixedSize(112, 104)
 
     def _build(self):
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.setSpacing(6)
-        layout.setContentsMargins(6, 10, 6, 10)
+        layout.setSpacing(5)
+        layout.setContentsMargins(6, 10, 6, 8)
 
-        self.icon_lbl = QLabel(self.icon)
+        self.icon_lbl = QLabel(self.info.icon or "🔬")
         self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.icon_lbl.setStyleSheet("font-size: 28px; background: transparent;")
+        self.icon_lbl.setStyleSheet("font-size: 26px; background: transparent;")
 
-        self.name_lbl = QLabel(self.display_name)
+        # Wrap the display name onto two lines so tiles stay a uniform height.
+        self.name_lbl = QLabel(self._wrapped_name())
         self.name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.name_lbl.setWordWrap(True)
-        self.name_lbl.setStyleSheet(
-            "font-size: 10px; font-weight: 600; background: transparent; color: #c9d1d9;"
-        )
+        self.name_lbl.setObjectName("pluginButtonLabel")
 
-        self.spinner_lbl = QLabel("")
-        self.spinner_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.spinner_lbl.setStyleSheet("font-size: 9px; background: transparent; color: #58a6ff;")
-        self.spinner_lbl.setVisible(False)
+        self.badge_lbl = QLabel("")
+        self.badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.badge_lbl.setObjectName("pluginButtonBadge")
+        self.badge_lbl.setFixedHeight(12)
+        if self.info.needs_input:
+            self.badge_lbl.setText("needs input")
 
         layout.addWidget(self.icon_lbl)
         layout.addWidget(self.name_lbl)
-        layout.addWidget(self.spinner_lbl)
+        layout.addWidget(self.badge_lbl)
 
-        self._set_idle_style()
+        tooltip = self.info.id
+        if self.info.description:
+            tooltip += f"\n\n{self.info.description}"
+        if self.info.needs_input:
+            required = ", ".join(a.name for a in self.info.required_args)
+            tooltip += f"\n\nRequires: {required}"
+        self.setToolTip(tooltip)
+
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._apply_style()
 
-    def _set_idle_style(self):
-        self.setStyleSheet(f"""
-            PluginButton {{
-                background-color: #161b22;
-                border: 1px solid #30363d;
-                border-radius: 10px;
-            }}
-            PluginButton:hover {{
-                background-color: #1c2128;
-                border: 1px solid {self.category_color};
-            }}
-        """)
+    def _wrapped_name(self) -> str:
+        name = self.info.short_name
+        if len(name) <= 12 or " " not in name:
+            return name
+        head, _, tail = name.partition(" ")
+        return f"{head}\n{tail}"
 
-    def _set_running_style(self):
-        self.setStyleSheet(f"""
-            PluginButton {{
-                background-color: #0d1f33;
-                border: 2px solid {self.category_color};
-                border-radius: 10px;
-            }}
-        """)
+    def set_dark(self, dark: bool):
+        self._dark = dark
+        self._apply_style()
 
     def set_running(self, running: bool):
         self._running = running
-        if running:
-            self._set_running_style()
-            self.spinner_lbl.setText("● running")
-            self.spinner_lbl.setVisible(True)
+        self.badge_lbl.setText(
+            "running…" if running else ("needs input" if self.info.needs_input else "")
+        )
+        self._apply_style()
+
+    def _apply_style(self):
+        color = self.info.color or "#8b949e"
+        if self._running:
+            background = "#0d1f33" if self._dark else "#e7f0fb"
+            border = f"2px solid {color}"
         else:
-            self._set_idle_style()
-            self.spinner_lbl.setVisible(False)
+            background = "#161b22" if self._dark else "#ffffff"
+            border = "1px solid " + ("#30363d" if self._dark else "#d5d9de")
+        hover_bg = "#1c2128" if self._dark else "#f2f6fa"
+        self.setStyleSheet(f"""
+            PluginButton {{
+                background-color: {background};
+                border: {border};
+                border-radius: 10px;
+            }}
+            PluginButton:hover {{
+                background-color: {hover_bg};
+                border: 1px solid {color};
+            }}
+            QLabel#pluginButtonLabel {{
+                font-size: 10px; font-weight: 600; background: transparent;
+                color: {"#c9d1d9" if self._dark else "#3b4149"};
+            }}
+            QLabel#pluginButtonBadge {{
+                font-size: 8px; font-weight: 700; background: transparent;
+                color: {color}; letter-spacing: 0.5px;
+            }}
+        """)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and not self._running:
-            self.clicked.emit(self.plugin_id, self.display_name)
+            self.clicked.emit(self.info.id)

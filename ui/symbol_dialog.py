@@ -159,7 +159,7 @@ class SymbolDialog(QDialog):
         self._downloader = SymbolDownloader(self.base_dir, pack, parent=self)
         self._downloader.progress.connect(self.dl_log.append)
         self._downloader.percent.connect(self.progress_bar.setValue)
-        self._downloader.finished.connect(self._on_download_done)
+        self._downloader.done.connect(self._on_download_done)
         self._downloader.start()
 
     def _on_download_done(self, success: bool, msg: str):

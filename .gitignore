@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Generated analysis output
+graphify-out/
+.pytest_cache/

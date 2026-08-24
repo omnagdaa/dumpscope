@@ -1,324 +1,384 @@
-import re
+"""
+The per-plugin results pane: a live table, a raw log, and the controls around them.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import os
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QFont, QKeySequence
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QApplication, QTableWidget,
-    QTableWidgetItem, QHeaderView, QLineEdit,
-    QAbstractItemView, QStackedWidget, QPlainTextEdit,
-    QSizePolicy
+    QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar,
+    QPlainTextEdit, QPushButton, QSizePolicy, QStackedWidget, QTableView,
+    QVBoxLayout, QWidget,
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont, QColor, QTextCursor
 
+from ui.result_model import ResultFilterProxy, ResultTableModel
 
-# Columns that should display as hex addresses
-HEX_COLUMNS = {"offset", "base", "start", "end", "address", "phys offset"}
-
-# Known good column widths
-COL_WIDTHS = {
-    "PID":           65,  "PPID":        65,  "TID":          65,
-    "Offset":       150,  "Base":        150,  "Start":       150,
-    "End":          150,  "Address":     150,
-    "ImageFileName":170,  "Name":        180,  "Process":     170,
-    "Path":         280,  "File output": 260,
-    "CreateTime":   195,  "ExitTime":    195,
-    "LocalAddr":    210,  "ForeignAddr": 210,
-    "State":        110,  "Proto":        70,  "Type":         90,
-    "Owner":        140,  "Handles":      80,  "GrantedAccess":110,
-    "Size":          90,  "Protection":  120,  "CommitCharge":  90,
-    "Wow64":         65,  "Audit":        65,  "Enabled":       70,
-    "BaseDllName":  200,  "FullDllPath":  300,
-    "Symbol":       240,  "Module":       160,
-    "Hive":         250,  "Key":          220,  "LastWriteTime":195,
-    "Data":         300,  "Type ":         90,
-    "Tag":           90,  "Info":         220,
-    "Variable":     180,  "Value":        260,
+# Sensible starting widths for columns vol3 emits constantly. Anything not
+# listed is sized from its header text, bounded so one wide column cannot push
+# every other column off screen.
+COLUMN_WIDTHS = {
+    "PID": 70, "PPID": 70, "TID": 70, "Threads": 75, "Handles": 75,
+    "SessionId": 80, "Wow64": 65, "Offset": 155, "Offset(V)": 155,
+    "Offset(P)": 155, "Base": 155, "Address": 155, "Start": 155, "End": 155,
+    "ImageFileName": 170, "Name": 180, "Process": 170, "Path": 300,
+    "File output": 240, "CreateTime": 190, "ExitTime": 190,
+    "LocalAddr": 160, "ForeignAddr": 160, "LocalPort": 85, "ForeignPort": 85,
+    "State": 120, "Proto": 70, "Owner": 150, "GrantedAccess": 120,
+    "Size": 95, "Protection": 130, "BaseDllName": 200, "FullDllPath": 320,
+    "Hive": 250, "Key": 240, "LastWriteTime": 190, "Data": 300,
+    "Value": 260, "Variable": 180, "Type": 110, "Tag": 90,
 }
+_MIN_WIDTH, _MAX_WIDTH = 70, 340
 
 
 class ResultPanel(QWidget):
-    def __init__(self, plugin_name: str, parent=None):
+    """
+    Displays one plugin run. Rows stream in through `append_rows` while the
+    plugin is still executing; the table stays sortable and filterable
+    throughout.
+    """
+
+    cancel_requested = pyqtSignal()
+    bookmark_requested = pyqtSignal(dict)   # the selected row as {column: value}
+
+    def __init__(self, plugin_name: str, plugin_id: str = "", parent=None):
         super().__init__(parent)
         self.plugin_name = plugin_name
-        self._headers: list[str] = []
-        self._separator_seen = False
-        self._header_set = False
-        self._raw_lines: list[str] = []
-        self._pending_rows: list[list[str]] = []
-        self._flush_timer = QTimer(self)
-        self._flush_timer.setInterval(120)
-        self._flush_timer.timeout.connect(self._flush_rows)
+        self.plugin_id = plugin_id
+        self._running = False
+        self._log_lines: list[str] = []
+
+        self.model = ResultTableModel(self)
+        self.proxy = ResultFilterProxy(self)
+        self.proxy.setSourceModel(self.model)
+
         self._build()
+
+    # ── Construction ──────────────────────────────────────────────────────────
 
     def _build(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        layout.addWidget(self._build_toolbar())
 
-        # ── Toolbar ───────────────────────────────────────────────────────────
-        toolbar = QWidget()
-        toolbar.setObjectName("resultToolbar")
-        toolbar.setFixedHeight(46)
-        tb = QHBoxLayout(toolbar)
-        tb.setContentsMargins(14, 0, 14, 0)
-        tb.setSpacing(8)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_table())
+        self.stack.addWidget(self._build_log())
+        layout.addWidget(self.stack, 1)
 
-        self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet(
-            "color: #f0883e; font-size: 10px; background: transparent;"
-        )
+    def _build_toolbar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("resultToolbar")
+        bar.setFixedHeight(46)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(14, 0, 14, 0)
+        row.setSpacing(8)
 
-        self.title_lbl = QLabel(f"  {self.plugin_name}")
-        self.title_lbl.setStyleSheet(
-            "font-size: 13px; font-weight: 700; background: transparent;"
-        )
+        self.status_dot = QLabel("◉")
+        self.status_dot.setObjectName("statusDot")
+        self.status_dot.setProperty("state", "running")
+
+        self.title_lbl = QLabel(self.plugin_name)
+        self.title_lbl.setObjectName("panelTitle")
+
+        self.progress = QProgressBar()
+        self.progress.setFixedWidth(160)
+        self.progress.setFixedHeight(6)
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 100)
+        self.progress.setVisible(False)
+
+        self.stage_lbl = QLabel("")
+        self.stage_lbl.setObjectName("panelStage")
+        self.stage_lbl.setMinimumWidth(0)
+        self.stage_lbl.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                     QSizePolicy.Policy.Preferred)
 
         self.row_count_lbl = QLabel("0 rows")
-        self.row_count_lbl.setStyleSheet(
-            "font-size: 11px; background: transparent;"
-        )
+        self.row_count_lbl.setObjectName("panelRowCount")
 
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("🔍  Filter…")
-        self.search_box.setFixedWidth(200)
-        self.search_box.setFixedHeight(28)
-        self.search_box.textChanged.connect(self._filter_rows)
-        self.search_box.setStyleSheet("")   # inherits from theme
+        self.filter_box = QLineEdit()
+        self.filter_box.setPlaceholderText("Filter rows…")
+        self.filter_box.setClearButtonEnabled(True)
+        self.filter_box.setFixedWidth(190)
+        self.filter_box.setFixedHeight(28)
+        self.filter_box.textChanged.connect(self._apply_filter)
 
-        self.view_btn = QPushButton("📄 Raw")
-        self.view_btn.setFixedWidth(72)
-        self.view_btn.setFixedHeight(28)
+        self.regex_chk = QCheckBox(".*")
+        self.regex_chk.setToolTip("Treat the filter as a regular expression")
+        self.regex_chk.toggled.connect(lambda _: self._apply_filter(self.filter_box.text()))
+
+        self.cancel_btn = QPushButton("Stop")
+        self.cancel_btn.setFixedSize(58, 28)
+        self.cancel_btn.setObjectName("dangerButton")
+        self.cancel_btn.clicked.connect(self._on_cancel)
+
+        self.view_btn = QPushButton("Log")
+        self.view_btn.setFixedSize(58, 28)
         self.view_btn.setCheckable(True)
         self.view_btn.toggled.connect(self._toggle_view)
 
+        export_btn = QPushButton("Export")
+        export_btn.setFixedSize(70, 28)
+        export_btn.clicked.connect(self.export_dialog)
+
         copy_btn = QPushButton("Copy")
-        copy_btn.setFixedWidth(56)
-        copy_btn.setFixedHeight(28)
-        copy_btn.clicked.connect(self._copy_all)
+        copy_btn.setFixedSize(58, 28)
+        copy_btn.clicked.connect(self.copy_visible)
 
-        clear_btn = QPushButton("Clear")
-        clear_btn.setFixedWidth(56)
-        clear_btn.setFixedHeight(28)
-        clear_btn.clicked.connect(self._clear)
+        row.addWidget(self.status_dot)
+        row.addWidget(self.title_lbl)
+        row.addSpacing(10)
+        row.addWidget(self.progress)
+        row.addWidget(self.stage_lbl, 1)
+        row.addWidget(self.row_count_lbl)
+        row.addSpacing(6)
+        row.addWidget(self.filter_box)
+        row.addWidget(self.regex_chk)
+        row.addWidget(self.cancel_btn)
+        row.addWidget(self.view_btn)
+        row.addWidget(export_btn)
+        row.addWidget(copy_btn)
+        return bar
 
-        tb.addWidget(self.status_dot)
-        tb.addWidget(self.title_lbl)
-        tb.addStretch()
-        tb.addWidget(self.row_count_lbl)
-        tb.addSpacing(8)
-        tb.addWidget(self.search_box)
-        tb.addWidget(self.view_btn)
-        tb.addWidget(copy_btn)
-        tb.addWidget(clear_btn)
-
-        # ── Stacked ───────────────────────────────────────────────────────────
-        self.stack = QStackedWidget()
-
-        # Table
-        self.table = QTableWidget()
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self.table.setSelectionMode(
-            QAbstractItemView.SelectionMode.ExtendedSelection
-        )
+    def _build_table(self) -> QTableView:
+        self.table = QTableView()
+        self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
-        self.table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Interactive
-        )
-        self.table.verticalHeader().setDefaultSectionSize(26)
-        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
-        self.table.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        self.table.setWordWrap(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        header.setHighlightSections(False)
+        # Enabling sorting makes the view sort by section 0 straight away, which
+        # scrambles output whose emitted order carries meaning — pstree's parent
+        # and child rows are only adjacent in vol3's own ordering. Clearing the
+        # indicator leaves rows in source order until a header is actually clicked.
+        header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        header.setSortIndicatorShown(False)
+        header.sortIndicatorChanged.connect(
+            lambda *_: header.setSortIndicatorShown(True)
         )
 
-        # Raw log
+        copy_action = QAction(self.table)
+        copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        copy_action.triggered.connect(self.copy_selection)
+        self.table.addAction(copy_action)
+        return self.table
+
+    def _build_log(self) -> QPlainTextEdit:
         mono = QFont()
         mono.setFamily("JetBrains Mono")
         mono.setStyleHint(QFont.StyleHint.Monospace)
         mono.setPointSize(10)
 
-        self.raw_view = QPlainTextEdit()
-        self.raw_view.setReadOnly(True)
-        self.raw_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.raw_view.setFont(mono)
-        self.raw_view.setObjectName("outputWindow")
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setFont(mono)
+        self.log_view.setObjectName("outputWindow")
+        self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.log_view.setMaximumBlockCount(5000)
+        return self.log_view
 
-        self.stack.addWidget(self.table)     # 0
-        self.stack.addWidget(self.raw_view)  # 1
+    # ── Streaming input ───────────────────────────────────────────────────────
 
-        layout.addWidget(toolbar)
-        layout.addWidget(self.stack, 1)
+    def set_columns(self, columns: list[str]):
+        self.model.set_columns(columns)
+        for index, name in enumerate(self.model.columns):
+            width = COLUMN_WIDTHS.get(name, len(name) * 10 + 30)
+            self.table.setColumnWidth(index, max(_MIN_WIDTH, min(width, _MAX_WIDTH)))
 
-    # ── Line ingestion ────────────────────────────────────────────────────────
+    def append_rows(self, rows: list[list[str]]):
+        self.model.append_rows(rows)
+        self._update_row_count()
 
-    def append_line(self, line: str):
-        self._raw_lines.append(line)
-        self.raw_view.appendPlainText(line)
+    def append_log(self, line: str):
+        self._log_lines.append(line)
+        self.log_view.appendPlainText(line)
 
-        stripped = line.strip()
-
-        # Skip command/progress lines
-        if not stripped:
+    def set_progress(self, percent: float, description: str):
+        if not self._running:
             return
-        if stripped.startswith(("$", "◌", "▶", "─")):
-            return
-        if stripped.startswith(("✓", "⚠", "[ERROR]")):
-            return
+        self.progress.setVisible(True)
+        self.progress.setValue(int(max(0.0, min(100.0, percent))))
+        self.stage_lbl.setText(description)
 
-        # Header detection
-        if not self._header_set:
-            # Separator line confirms the previous line was the header
-            if set(stripped.replace(" ", "")) <= {"─", "-", "━"}:
-                self._separator_seen = True
-                return
-            if not self._separator_seen:
-                # This IS the header
-                cols = self._split_cols(line)
-                if len(cols) >= 2:
-                    self._setup_table(cols)
-                return
-            # separator seen but header not set — shouldn't happen
-            return
+    def _update_row_count(self):
+        total = self.model.rowCount()
+        shown = self.proxy.rowCount()
+        self.row_count_lbl.setText(
+            f"{shown:,} / {total:,} rows" if shown != total else f"{total:,} rows"
+        )
 
-        # Data row
-        cells = self._split_cols(line)
-        if cells:
-            self._pending_rows.append(cells)
-            if not self._flush_timer.isActive():
-                self._flush_timer.start()
+    # ── State ─────────────────────────────────────────────────────────────────
 
-    def _split_cols(self, line: str) -> list[str]:
-        """Split vol3 output: columns separated by 2+ spaces."""
-        parts = re.split(r"  +", line.strip())
-        return [p.strip() for p in parts if p.strip()]
+    def set_running(self, running: bool):
+        self._running = running
+        self.cancel_btn.setVisible(running)
+        self.progress.setVisible(running)
+        self._set_state("running" if running else "done")
+        if not running:
+            self.stage_lbl.setText("")
+            self.progress.setVisible(False)
+            self._update_row_count()
 
-    def _setup_table(self, headers: list[str]):
-        self.table.setSortingEnabled(False)
-        self.table.setColumnCount(len(headers))
-        self.table.setHorizontalHeaderLabels(headers)
-        self.table.setRowCount(0)
-        self._headers = headers
-        self._header_set = True
+    def set_finished(self, exit_code: int, cancelled: bool = False):
+        self.set_running(False)
+        if cancelled:
+            self._set_state("cancelled")
+            self.stage_lbl.setText("Cancelled")
+        elif exit_code == 0:
+            self._set_state("done")
+            if self.model.rowCount() == 0:
+                self.stage_lbl.setText("No results")
+        else:
+            self._set_state("error")
 
-        for i, h in enumerate(headers):
-            w = COL_WIDTHS.get(h, max(len(h) * 9, 80))
-            w = min(w, 320)
-            self.table.setColumnWidth(i, w)
+    def set_error(self, message: str):
+        self.set_running(False)
+        self._set_state("error")
+        self.append_log("")
+        self.append_log(f"ERROR: {message}")
+        self.view_btn.setChecked(True)      # errors are only visible in the log
 
-        self.table.setSortingEnabled(True)
+    def _set_state(self, state: str):
+        glyphs = {"running": "◉", "done": "●", "error": "✕", "cancelled": "◌"}
+        self.status_dot.setText(glyphs.get(state, "●"))
+        self.status_dot.setProperty("state", state)
+        # Re-polish so the stylesheet's [state=...] selector takes effect.
+        self.status_dot.style().unpolish(self.status_dot)
+        self.status_dot.style().polish(self.status_dot)
 
-    def _flush_rows(self):
-        if not self._pending_rows:
-            self._flush_timer.stop()
-            return
+    def _on_cancel(self):
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("…")
+        self.cancel_requested.emit()
 
-        self.table.setSortingEnabled(False)
-        batch = self._pending_rows[:200]
-        self._pending_rows = self._pending_rows[200:]
-        n = len(self._headers)
+    # ── Filter / view ─────────────────────────────────────────────────────────
 
-        for cells in batch:
-            # Pad/trim to column count
-            while len(cells) < n:
-                cells.append("")
-            if len(cells) > n:
-                cells = cells[:n - 1] + [" ".join(cells[n - 1:])]
-
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-
-            for col, val in enumerate(cells):
-                item = QTableWidgetItem(val)
-                item.setFlags(
-                    Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-                )
-                self.table.setItem(row, col, item)
-
-        self.table.setSortingEnabled(True)
-        count = self.table.rowCount()
-        self.row_count_lbl.setText(f"{count} rows")
-
-        if not self._pending_rows:
-            self._flush_timer.stop()
-
-    # ── Filtering ─────────────────────────────────────────────────────────────
-
-    def _filter_rows(self, text: str):
-        text = text.lower()
-        for row in range(self.table.rowCount()):
-            if not text:
-                self.table.setRowHidden(row, False)
-                continue
-            match = any(
-                (item := self.table.item(row, col)) and text in item.text().lower()
-                for col in range(self.table.columnCount())
-            )
-            self.table.setRowHidden(row, not match)
-
-    # ── View toggle ───────────────────────────────────────────────────────────
+    def _apply_filter(self, text: str):
+        use_regex = self.regex_chk.isChecked()
+        self.proxy.set_filter(text, use_regex=use_regex)
+        invalid = use_regex and text.strip() and not self.proxy.filter_is_valid_regex
+        self.filter_box.setProperty("invalid", bool(invalid))
+        self.filter_box.style().unpolish(self.filter_box)
+        self.filter_box.style().polish(self.filter_box)
+        self._update_row_count()
 
     def _toggle_view(self, checked: bool):
         self.stack.setCurrentIndex(1 if checked else 0)
-        self.view_btn.setText("📊 Table" if checked else "📄 Raw")
+        self.view_btn.setText("Table" if checked else "Log")
 
-    # ── Status ────────────────────────────────────────────────────────────────
+    # ── Context menu ──────────────────────────────────────────────────────────
 
-    def set_running(self, running: bool):
-        if running:
-            self.status_dot.setStyleSheet(
-                "color: #f0883e; font-size: 10px; background: transparent;"
-            )
-            self.status_dot.setText("◉")
-        else:
-            self._flush_timer.stop()
-            self._flush_rows()   # flush remainder
-            self.status_dot.setStyleSheet(
-                "color: #3daee9; font-size: 10px; background: transparent;"
-            )
-            self.status_dot.setText("●")
+    def _show_context_menu(self, point):
+        index = self.table.indexAt(point)
+        if not index.isValid():
+            return
+        menu = QMenu(self)
+        menu.addAction("Copy Cell", lambda: self._copy_cell(index))
+        menu.addAction("Copy Row", self.copy_selection)
+        menu.addSeparator()
+        menu.addAction("Add Bookmark", lambda: self._bookmark(index))
+        menu.exec(self.table.viewport().mapToGlobal(point))
 
-    def set_error(self, msg: str):
-        self._flush_timer.stop()
-        self.status_dot.setStyleSheet(
-            "color: #e5534b; font-size: 10px; background: transparent;"
+    def _copy_cell(self, index):
+        QApplication.clipboard().setText(str(index.data() or ""))
+
+    def _bookmark(self, index):
+        source_row = self.proxy.mapToSource(index).row()
+        payload = self.model.row_dict(source_row)
+        payload["__plugin__"] = self.plugin_id or self.plugin_name
+        self.bookmark_requested.emit(payload)
+
+    # ── Copy / export ─────────────────────────────────────────────────────────
+
+    def _visible_rows(self) -> list[list[str]]:
+        return [
+            self.model.row_values(self.proxy.mapToSource(self.proxy.index(r, 0)).row())
+            for r in range(self.proxy.rowCount())
+        ]
+
+    def copy_visible(self):
+        if self.stack.currentIndex() == 1:
+            QApplication.clipboard().setText(self.log_view.toPlainText())
+            return
+        lines = ["\t".join(self.model.columns)]
+        lines += ["\t".join(row) for row in self._visible_rows()]
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def copy_selection(self):
+        rows = sorted({i.row() for i in self.table.selectionModel().selectedIndexes()})
+        if not rows:
+            self.copy_visible()
+            return
+        lines = ["\t".join(self.model.columns)]
+        for r in rows:
+            source = self.proxy.mapToSource(self.proxy.index(r, 0)).row()
+            lines.append("\t".join(self.model.row_values(source)))
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def export_dialog(self, directory: str = ""):
+        suggested = (self.plugin_id or self.plugin_name).replace(".", "_") + ".csv"
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Export Results", os.path.join(directory or "", suggested),
+            "CSV (*.csv);;JSON (*.json);;Tab-separated (*.tsv)",
         )
-        self.status_dot.setText("✕")
-        self.raw_view.appendPlainText(f"\n[ERROR] {msg}")
-        self.view_btn.setChecked(True)   # show raw on error
+        if not path:
+            return
+        try:
+            self.export_to(path, "json" if path.lower().endswith(".json")
+                           else "tsv" if path.lower().endswith(".tsv") else "csv")
+        except OSError as exc:
+            QMessageBox.critical(self, "Export Failed", str(exc))
+            return
+        self.append_log(f"Exported {self.proxy.rowCount():,} rows to {path}")
 
-    # ── Copy / Clear ──────────────────────────────────────────────────────────
+    def export_to(self, path: str, fmt: str = "csv"):
+        """Write the currently visible (filtered, sorted) rows to `path`."""
+        columns = self.model.columns
+        rows = self._visible_rows()
+        if fmt == "json":
+            payload = {
+                "plugin": self.plugin_id or self.plugin_name,
+                "columns": columns,
+                "rows": [dict(zip(columns, row)) for row in rows],
+            }
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+            return
+        delimiter = "\t" if fmt == "tsv" else ","
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh, delimiter=delimiter)
+            writer.writerow(columns)
+            writer.writerows(rows)
 
-    def _copy_all(self):
-        if self.stack.currentIndex() == 0:
-            rows = []
-            rows.append("\t".join(
-                self.table.horizontalHeaderItem(c).text()
-                for c in range(self.table.columnCount())
-            ))
-            for r in range(self.table.rowCount()):
-                if not self.table.isRowHidden(r):
-                    rows.append("\t".join(
-                        (self.table.item(r, c).text()
-                         if self.table.item(r, c) else "")
-                        for c in range(self.table.columnCount())
-                    ))
-            QApplication.clipboard().setText("\n".join(rows))
-        else:
-            QApplication.clipboard().setText(self.raw_view.toPlainText())
+    # ── Persistence helpers ───────────────────────────────────────────────────
 
-    def _clear(self):
-        self._flush_timer.stop()
-        self.table.setRowCount(0)
-        self.raw_view.clear()
-        self._raw_lines.clear()
-        self._headers.clear()
-        self._pending_rows.clear()
-        self._header_set = False
-        self._separator_seen = False
-        self.row_count_lbl.setText("0 rows")
+    def result_payload(self) -> dict:
+        """The full result set, for storing against the case."""
+        return {
+            "plugin": self.plugin_id or self.plugin_name,
+            "columns": self.model.columns,
+            "rows": [self.model.row_values(r) for r in range(self.model.rowCount())],
+        }
+
+    @property
+    def log_text(self) -> str:
+        return "\n".join(self._log_lines)

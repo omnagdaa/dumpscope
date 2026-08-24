@@ -2,7 +2,7 @@
 name = "dumpscope"
 version = "0.1.0"
 description = "Memory Forensics Application"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "pyqt6>=6.6.0",
     "volatility3>=2.5.0",
@@ -14,3 +14,8 @@ packages = ["ui", "core"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
