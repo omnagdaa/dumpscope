@@ -60,37 +60,103 @@ def detect_os_from_banner(text: str) -> str | None:
     return None
 
 
-def find_vol3_command() -> list[str]:
+_COMMAND_CACHE: list[str] | None = None
+
+
+# volatility3.cli is a package with no __main__, so ``-m volatility3.cli``
+# refuses to run; the installed script calls ``main()`` from it directly, and
+# so does this.
+# argv[0] is rewritten because volatility3's parser reads it: left as "-c" it
+# is taken for the --config flag and the run dies on argument parsing.
+_CLI_ENTRY = (
+    "import sys; sys.argv[0] = 'vol'; "
+    "from volatility3.cli import main; sys.exit(main())"
+)
+
+
+def _module_command() -> list[str] | None:
     """
-    Locate the volatility3 CLI. Prefers an executable next to the running
-    interpreter (the project venv) before falling back to PATH, so a system-wide
-    vol3 of a different version cannot shadow the one this app was built
-    against. Falls back to invoking the library through the interpreter itself,
-    which always works when volatility3 is importable but no script was
-    installed.
+    volatility3's CLI entry point, called through the interpreter running this
+    app, when volatility3 is importable from it.
+
+    This is preferred over the installed ``vol`` script for two reasons. It
+    cannot pick up a different volatility3 than the one the GUI introspected
+    for plugin arguments — the script on PATH may belong to another
+    environment entirely. And on Windows, console scripts in a uv-created venv
+    are trampoline executables that re-resolve their own path at launch; when
+    that resolution fails the process dies before volatility3 is reached, with
+    no traceback and only "uv trampoline failed to canonicalize script path"
+    on stderr. Going through the interpreter skips the trampoline.
     """
+    if getattr(sys, "frozen", False):
+        return None                     # a bundled app has no importable venv
+    executable = sys.executable
+    if not executable:
+        return None
+    # pythonw has no console, but it also cannot report a startup failure;
+    # the console build sits beside it and is the one to spawn.
+    if sys.platform == "win32" and os.path.basename(executable).lower() == "pythonw.exe":
+        console = os.path.join(os.path.dirname(executable), "python.exe")
+        if os.path.isfile(console):
+            executable = console
+    try:
+        import importlib.util
+        if importlib.util.find_spec("volatility3.cli") is None:
+            return None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return None
+    return [executable, "-c", _CLI_ENTRY]
+
+
+def _script_command() -> list[str] | None:
+    """The installed vol3 console script, looked for beside the interpreter first."""
     interpreter_dir = os.path.dirname(sys.executable)
     search_dirs = [
         interpreter_dir,
         os.path.normpath(os.path.join(interpreter_dir, "..", "Scripts")),
         os.path.join(interpreter_dir, "Scripts"),
+        os.path.normpath(os.path.join(interpreter_dir, "..", "bin")),
     ]
-    suffixes = (".exe", ".cmd", ".bat", "") if sys.platform == "win32" else ("",)
+    # Only .exe: CreateProcess cannot run a .cmd or .bat without a shell, so
+    # offering them here would find a file that then fails to launch.
+    suffixes = (".exe",) if sys.platform == "win32" else ("",)
 
     for name in ("vol", "vol3", "volatility3", "volatility"):
         for directory in search_dirs:
             for suffix in suffixes:
                 candidate = os.path.join(directory, name + suffix)
                 if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                    log.debug("Using vol3 at %s", candidate)
                     return [candidate]
         found = shutil.which(name)
-        if found:
-            log.debug("Using vol3 from PATH: %s", found)
+        if found and found.lower().endswith(suffixes):
             return [found]
+    return None
 
-    log.warning("No vol3 executable found — invoking the library directly")
-    return [sys.executable, "-m", "volatility3.cli"]
+
+def find_vol3_command() -> list[str]:
+    """
+    How to invoke volatility3, decided once and reused.
+
+    The result was previously recomputed for every run, which meant a
+    filesystem walk per plugin launch and a log line to match.
+    """
+    global _COMMAND_CACHE
+    if _COMMAND_CACHE is not None:
+        return list(_COMMAND_CACHE)
+
+    command = _module_command()
+    if command is None:
+        command = _script_command()
+        if command is None:
+            log.warning("No volatility3 found — calling the library directly")
+            command = [sys.executable, "-c", _CLI_ENTRY]
+        else:
+            log.info("Using the vol3 script at %s", command[0])
+    else:
+        log.info("Using the volatility3 library via %s", command[0])
+
+    _COMMAND_CACHE = command
+    return list(command)
 
 
 def build_environment(symbol_dirs: list[str] | None = None) -> dict[str, str]:
@@ -108,6 +174,13 @@ def build_environment(symbol_dirs: list[str] | None = None) -> dict[str, str]:
     if sys.platform == "win32":
         env.setdefault("PATHEXT", ".exe;.cmd;.bat;.com")
     return env
+
+
+def _printable(command: list[str]) -> str:
+    """The command as a line an examiner could paste into a shell."""
+    return " ".join(
+        f'"{part}"' if (" " in part or ";" in part) else part for part in command
+    )
 
 
 def _creation_flags() -> int:
@@ -214,7 +287,7 @@ class VolatilityRunner(QThread):
         import io
 
         command = self.spec.command()
-        self.log_line.emit("$ " + " ".join(command))
+        self.log_line.emit("$ " + _printable(command))
 
         self._proc = subprocess.Popen(
             command,

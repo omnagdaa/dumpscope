@@ -50,6 +50,10 @@ _GLYPHS: dict[str, str] = {
     "gear": '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1"/>',
     "tag": '<path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2.5 12.5V2.5h10l8.1 8.1a2 2 0 0 1 0 2.8z"/><circle cx="7" cy="7" r="1.2"/>',
     "calendar": '<rect x="3.5" y="4.5" width="17" height="16" rx="2"/><path d="M16 2.5v4M8 2.5v4M3.5 10h17"/>',
+    "sun": '<circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/>',
+    "moon": '<path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/>',
+    "command": '<path d="M8.5 3.5A2.5 2.5 0 1 1 6 6v12a2.5 2.5 0 1 1 2.5-2.5h7A2.5 2.5 0 1 1 18 18V6a2.5 2.5 0 1 1-2.5 2.5z"/>',
+    "chevron": '<path d="M9 6l6 6-6 6"/>',
     "target": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.3"/>',
     "info": '<circle cx="12" cy="12" r="9"/><path d="M12 16.5v-5M12 7.8h.01"/>',
     "eye": '<path d="M2 12s3.8-7 10-7 10 7 10 7-3.8 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="2.8"/>',
@@ -143,8 +147,9 @@ def pixmap(name: str, size: int = 18, color: str = "#8b949e",
     return canvas
 
 
-def icon(name: str, size: int = 18, color: str = "#8b949e", width: float = 1.7) -> QIcon:
-    return QIcon(pixmap(name, size=size, color=color, width=width))
+def icon(name: str, size: int = 18, color: str = "#8b949e", width: float = 1.7,
+         ratio: float = 1.0) -> QIcon:
+    return QIcon(pixmap(name, size=size, color=color, width=width, ratio=ratio))
 
 
 def clear_cache():

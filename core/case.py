@@ -28,6 +28,8 @@ import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
+from core.paths import config_dir
+
 log = logging.getLogger("dumpscope.case")
 
 CASE_FILE = "case.json"
@@ -220,8 +222,7 @@ class Case:
 # ── Recent cases ──────────────────────────────────────────────────────────────
 
 def _config_dir() -> str:
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return os.path.join(base, "dumpscope")
+    return config_dir()
 
 
 def recent_file() -> str:

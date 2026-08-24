@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QWidget
 )
 from ui.theme import restyle
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QDesktopServices
 from core.symbol_downloader import SymbolDownloader
 
 
@@ -175,14 +176,12 @@ class SymbolDialog(QDialog):
             self._downloader = None
 
     def _open_dir(self, path: str):
+        """Show a folder in the system file manager."""
         os.makedirs(path, exist_ok=True)
-        import subprocess, sys
-        if sys.platform == "linux":
-            subprocess.Popen(["xdg-open", path])
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["explorer", path])
+        # Qt picks the right opener per platform. Spawning `explorer` by hand
+        # returns a non-zero exit code even on success and mishandles forward
+        # slashes, which is what a path built with os.path.join can contain.
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
 
     def get_yara_files(self) -> list[str]:
         """Return list of full paths to all yara rule files."""

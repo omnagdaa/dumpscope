@@ -20,6 +20,8 @@ import zipfile
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from core.paths import cache_dir
+
 log = logging.getLogger("dumpscope.symbols")
 
 SYMBOL_BASE_URL = "https://downloads.volatilityfoundation.org/volatility3/symbols"
@@ -65,7 +67,7 @@ def get_vol3_cache_dir() -> str:
                 return path
     except Exception:
         pass
-    return os.path.expanduser("~/.cache/volatility3")
+    return os.path.join(os.path.dirname(cache_dir()), "volatility3")
 
 
 class SymbolDownloader(QThread):

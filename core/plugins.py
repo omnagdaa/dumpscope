@@ -28,6 +28,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from core.paths import cache_dir
+
 log = logging.getLogger("dumpscope.plugins")
 
 # Requirement names that the CLI satisfies automatically from -f/--single-location.
@@ -134,8 +136,7 @@ json.dump(out, sys.stdout)
 
 
 def _cache_path() -> str:
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(base, "dumpscope", "plugin_registry.json")
+    return os.path.join(cache_dir(), "plugin_registry.json")
 
 
 def introspect(python: str | None = None, timeout: int = 180) -> dict:
@@ -212,12 +213,12 @@ def load_introspected(refresh: bool = False) -> dict | None:
 # guaranteed to survive, so the new path is used throughout.
 
 CATEGORIES: tuple[tuple[str, str], ...] = (
-    ("Processes", "#58a6ff"),
-    ("Network",   "#3fb950"),
-    ("Memory",    "#f0883e"),
-    ("Registry",  "#bc8cff"),
-    ("System",    "#e3b341"),
-    ("Malware",   "#f85149"),
+    ("Processes", "#7fbfa6"),
+    ("Network",   "#8fbf7f"),
+    ("Memory",    "#e0a06a"),
+    ("Registry",  "#b39ddb"),
+    ("System",    "#d9c07a"),
+    ("Malware",   "#e0796f"),
 )
 
 CATEGORY_COLORS = dict(CATEGORIES)
@@ -420,7 +421,7 @@ class PluginRegistry:
                 name=name,
                 icon=icon,
                 category=category,
-                color=CATEGORY_COLORS.get(category, "#8b949e"),
+                color=CATEGORY_COLORS.get(category, "#95a09b"),
             )
 
     # ── Lookup ────────────────────────────────────────────────────────────────

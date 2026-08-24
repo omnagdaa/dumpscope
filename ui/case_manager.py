@@ -13,7 +13,8 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
     QLabel, QListWidget,
@@ -213,17 +214,8 @@ class CaseManager(QDialog):
 
     @staticmethod
     def _reveal(directory: str):
-        import subprocess
-        import sys
-        try:
-            if sys.platform == "linux":
-                subprocess.Popen(["xdg-open", directory])
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", directory])
-            else:
-                subprocess.Popen(["explorer", os.path.normpath(directory)])
-        except OSError:
-            pass
+        """Show a case folder in the system file manager."""
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(directory)))
 
     # ── Actions ───────────────────────────────────────────────────────────────
 

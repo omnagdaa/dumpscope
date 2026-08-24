@@ -7,6 +7,7 @@ import sys
 import pytest
 from PyQt6.QtCore import QEventLoop, QTimer
 
+from core import vol_runner
 from core.vol_runner import RunSpec, VolatilityRunner, detect_os_from_banner
 
 
@@ -123,3 +124,63 @@ def test_banner_detection():
     assert detect_os_from_banner("Microsoft Windows 10 ntoskrnl.exe") == "windows"
     assert detect_os_from_banner("Darwin Kernel Version 21.0") == "mac"
     assert detect_os_from_banner("nothing recognisable here") is None
+
+
+# ── Locating volatility3 ──────────────────────────────────────────────────────
+
+class TestFindingVolatility3:
+    """
+    How vol3 is invoked. On Windows the installed `vol.exe` in a uv venv is a
+    trampoline that re-resolves its own path at startup; when that fails the
+    process dies with "uv trampoline failed to canonicalize script path" before
+    volatility3 is ever imported. Calling the library through the interpreter
+    avoids the trampoline, and pins the run to the same volatility3 the GUI
+    introspected for plugin arguments.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        vol_runner._COMMAND_CACHE = None
+        yield
+        vol_runner._COMMAND_CACHE = None
+
+    def test_prefers_the_library_over_the_installed_script(self):
+        command = vol_runner.find_vol3_command()
+        assert command[0] == sys.executable
+        assert command[1] == "-c"
+        assert not any(part.endswith(("vol", "vol.exe")) for part in command)
+
+    def test_the_entry_point_rewrites_argv0(self):
+        # volatility3's parser reads argv[0]; left as "-c" it is taken for the
+        # --config flag and every run dies on argument parsing.
+        assert "sys.argv[0] = 'vol'" in vol_runner._CLI_ENTRY
+
+    def test_the_entry_point_actually_starts_volatility3(self):
+        proc = subprocess.run(
+            vol_runner.find_vol3_command() + ["-h"],
+            capture_output=True, text=True, timeout=180,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "usage: vol" in proc.stdout
+
+    def test_the_answer_is_cached_but_not_shared(self):
+        first = vol_runner.find_vol3_command()
+        first.append("mutated")
+        assert "mutated" not in vol_runner.find_vol3_command()
+
+    def test_the_script_search_ignores_cmd_and_bat_on_windows(self, monkeypatch, tmp_path):
+        # CreateProcess cannot run a .cmd without a shell, so finding one here
+        # would report success and then fail to launch.
+        monkeypatch.setattr(vol_runner.sys, "platform", "win32")
+        monkeypatch.setattr(vol_runner.sys, "executable", str(tmp_path / "python.exe"))
+        (tmp_path / "vol.cmd").write_text("@echo off")
+        monkeypatch.setattr(vol_runner.shutil, "which", lambda _name: None)
+        assert vol_runner._script_command() is None
+
+    def test_falls_back_to_the_script_when_the_library_is_absent(self, monkeypatch, tmp_path):
+        script = tmp_path / "vol"
+        script.write_text("#!/bin/sh\n")
+        script.chmod(0o755)
+        monkeypatch.setattr(vol_runner, "_module_command", lambda: None)
+        monkeypatch.setattr(vol_runner.sys, "executable", str(tmp_path / "python"))
+        assert vol_runner.find_vol3_command() == [str(script)]

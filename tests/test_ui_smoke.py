@@ -140,3 +140,49 @@ def test_a_second_header_click_does_not_re_enter(qapp):
     QApplication.processEvents()
     assert panel.table.isSortingEnabled() == enabled_before
     panel.deleteLater()
+
+
+# ── Window chrome ─────────────────────────────────────────────────────────────
+
+def _window(tmp_path, name="Chrome Case"):
+    from core.case import Case
+    from ui.main_window import MainWindow
+
+    return MainWindow(Case.create(str(tmp_path), name))
+
+
+def test_the_case_identifies_itself_in_the_sidebar_not_a_title_bar(qapp, tmp_path):
+    window = _window(tmp_path, "Operation Tidewater")
+    assert window.case_tag.text() == "Operation Tidewater"
+    # The header is inside the dock, so the case travels with the sidebar.
+    assert window.case_dock.isAncestorOf(window.case_tag)
+    assert window.case_dock.isAncestorOf(window.os_badge)
+    assert not hasattr(window, "_build_topbar")
+    window.close()
+
+
+def test_the_os_badge_recovers_its_text_after_probing(qapp, tmp_path):
+    """
+    A QLabel shows a pixmap *or* text. Handing the badge a null pixmap while
+    probing used to blank it permanently, because the OS it settled on was the
+    one already set and the refresh was skipped.
+    """
+    window = _window(tmp_path)
+    window._set_badge_probing()
+    assert window.os_badge.text() == "Identifying…"
+    window._update_os_badge()
+    assert window.os_badge.text().startswith("Windows")
+    window.close()
+
+
+def test_the_ribbon_carries_the_theme_toggle_and_no_density_button(qapp, tmp_path):
+    window = _window(tmp_path)
+    ribbon = window.ribbon
+    assert not hasattr(ribbon, "density_btn")
+    assert ribbon.compact, "tiles are compact by default"
+
+    dark_before = window.is_dark
+    ribbon.theme_btn.click()
+    assert window.is_dark is not dark_before
+    assert ribbon.theme_btn.property("glyph") == ("moon" if window.is_dark else "sun")
+    window.close()

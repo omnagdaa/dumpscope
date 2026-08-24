@@ -26,57 +26,63 @@ from string import Template
 # The accent ramp matches the plugin category colours in core.plugins, so the
 # ribbon and the chrome around it belong to the same palette.
 
+# "Islands": a warm graphite ground with a sea-green accent. The previous dark
+# palette was GitHub's, which tints every surface blue; on a tool whose own
+# output is mostly blue-highlighted rows, that left nothing quiet to read
+# against.
 DARK = {
-    "bg":            "#0d1117",
-    "surface":       "#161b22",
-    "surface_alt":   "#1c2128",
-    "surface_high":  "#21262d",
-    "border":        "#30363d",
-    "border_strong": "#484f58",
-    "text":          "#e6edf3",
-    "text_dim":      "#8b949e",
-    "text_faint":    "#6e7681",
-    "accent":        "#58a6ff",
-    "accent_hover":  "#79c0ff",
-    "accent_soft":   "#132b47",
-    "on_accent":     "#ffffff",
-    "ok":            "#3fb950",
-    "ok_soft":       "#0f2419",
-    "warn":          "#e3b341",
-    "warn_soft":     "#2b2211",
-    "danger":        "#f85149",
-    "danger_hover":  "#ff6b63",
-    "danger_soft":   "#2d1416",
-    "select":        "#1f6feb",
-    "on_select":     "#ffffff",
-    "shadow":        "#010409",
+    "bg":            "#15181a",
+    "surface":       "#1b1f21",
+    "surface_alt":   "#212628",
+    "surface_high":  "#272d2f",
+    "border":        "#323a3c",
+    "border_strong": "#47514f",
+    "text":          "#dee4e0",
+    "text_dim":      "#95a09b",
+    "text_faint":    "#6d7772",
+    "accent":        "#7fbfa6",
+    "accent_hover":  "#9bd6bd",
+    "accent_soft":   "#18302a",
+    # The accent is a light green, so text printed on it has to be dark.
+    "on_accent":     "#0f201b",
+    "ok":            "#8fbf7f",
+    "ok_soft":       "#1b2a1a",
+    "warn":          "#dfb06a",
+    "warn_soft":     "#2e2617",
+    "danger":        "#e0796f",
+    "danger_hover":  "#f0938a",
+    "danger_soft":   "#301c1a",
+    "select":        "#2e5f52",
+    "on_select":     "#eaf3ee",
+    "shadow":        "#0a0d0e",
 }
 
 LIGHT = {
-    "bg":            "#f6f8fa",
+    "bg":            "#f3f5f1",
     "surface":       "#ffffff",
-    "surface_alt":   "#f0f3f6",
-    "surface_high":  "#eaeef2",
-    "border":        "#d0d7de",
-    "border_strong": "#afb8c1",
-    "text":          "#1f2328",
-    "text_dim":      "#59636e",
-    "text_faint":    "#818b98",
-    "accent":        "#0969da",
-    "accent_hover":  "#218bff",
-    "accent_soft":   "#ddf4ff",
+    "surface_alt":   "#ebeee8",
+    "surface_high":  "#e2e6df",
+    "border":        "#d2d7cd",
+    "border_strong": "#aeb5ab",
+    "text":          "#1d2422",
+    "text_dim":      "#556058",
+    "text_faint":    "#7b857e",
+    "accent":        "#2c7a61",
+    "accent_hover":  "#20604b",
+    "accent_soft":   "#dcefe6",
     "on_accent":     "#ffffff",
-    "ok":            "#1a7f37",
-    "ok_soft":       "#dafbe1",
-    "warn":          "#9a6700",
-    "warn_soft":     "#fff8c5",
-    "danger":        "#cf222e",
-    "danger_hover":  "#a40e26",
-    "danger_soft":   "#ffebe9",
-    "select":        "#0969da",
+    "ok":            "#2f7d3f",
+    "ok_soft":       "#dcf2dd",
+    "warn":          "#8a6410",
+    "warn_soft":     "#faf0d2",
+    "danger":        "#b4342c",
+    "danger_hover":  "#8d251f",
+    "danger_soft":   "#fbe3e0",
+    "select":        "#2c7a61",
     "on_select":     "#ffffff",
-    "shadow":        "#8c959f",
+    "shadow":        "#a8b0a7",
 }
+
 
 _FONTS = {
     "ui_font":   "'Inter', 'Segoe UI', 'Ubuntu', 'Cantarell', sans-serif",
@@ -385,19 +391,17 @@ QPushButton#iconButton {
 }
 QPushButton#iconButton:hover { background-color: $surface_alt; color: $accent; }
 
-/* ── Application chrome ────────────────────────────────────────────────── */
-QWidget#topBar {
-    background-color: $surface;
+/* ── Case header (top of the left sidebar) ─────────────────────────────── */
+/* The window used to open with a title bar carrying the product name and the
+   case name. Neither is a working surface: the name of the tool is known to
+   whoever launched it, and the case belongs beside the case explorer. */
+QWidget#caseSidebar { background-color: $surface; }
+QWidget#caseHeader {
+    background-color: $surface_alt;
     border-bottom: 1px solid $border;
 }
-QLabel#appLogo {
-    font-size: 15px;
-    font-weight: 800;
-    color: $accent;
-    letter-spacing: 0.5px;
-}
 QLabel#caseTag, QLabel#caseNameLabel {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 700;
     color: $text;
 }
@@ -421,6 +425,33 @@ QLabel#osBadge[os="mac"]     { background-color: $warn_soft; color: $warn; }
 QLabel#osBadge[probing="true"] {
     background-color: $surface_high;
     color: $text_faint;
+}
+
+/* ── Command palette ───────────────────────────────────────────────────── */
+QDialog#commandPalette {
+    background-color: $surface;
+    border: 1px solid $border_strong;
+    border-radius: 8px;
+}
+QLineEdit#paletteInput {
+    background-color: transparent;
+    border: none;
+    border-bottom: 1px solid $border;
+    border-radius: 0;
+    padding: 0 14px;
+    font-size: 14px;
+    color: $text;
+}
+QListWidget#paletteList {
+    background-color: transparent;
+    border: none;
+    padding: 4px 4px 6px 4px;
+}
+QListWidget#paletteList::item { padding: 4px 10px; border-radius: 4px; }
+QLabel#paletteEmpty {
+    color: $text_faint;
+    padding: 26px;
+    qproperty-alignment: AlignCenter;
 }
 
 /* ── Plugin ribbon ─────────────────────────────────────────────────────── */

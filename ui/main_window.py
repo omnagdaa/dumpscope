@@ -10,7 +10,7 @@ import os
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
-from PyQt6.QtGui import QAction, QColor, QDesktopServices, QPixmap
+from PyQt6.QtGui import QAction, QColor, QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication, QColorDialog, QDockWidget, QFileDialog, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
@@ -159,16 +159,18 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        root.addWidget(self._build_topbar())
-
         self.ribbon = PluginRibbon(self.registry, compact=True)
         self.ribbon.plugin_clicked.connect(self._on_plugin_clicked)
+        self.ribbon.theme_toggled.connect(self.toggle_theme)
+        self.ribbon.palette_requested.connect(self.open_command_palette)
         root.addWidget(self.ribbon)
+
+        # The OS badge lives in the sidebar, so the sidebar has to exist before
+        # anything sets an OS.
+        self._build_case_dock()
         # Something has to be on the ribbon before the probe reports, and the
         # probe cannot report at all until an image is loaded.
         self.set_os(DEFAULT_OS, quiet=True)
-
-        self._build_case_dock()
 
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
@@ -184,45 +186,57 @@ class MainWindow(QMainWindow):
 
     def _build_case_dock(self):
         """
-        The case explorer, docked left. Quick Analysis has no case to explore,
-        so it is not created at all rather than shown empty.
+        The left sidebar: the case header, the case explorer, and the tag index.
+
+        Quick Analysis has no database, so it has no sources, results or tags
+        to explore — but it still has an image and a detected OS, so the header
+        is built either way and only the navigation below it is conditional.
         """
+        container = QWidget()
+        container.setObjectName("caseSidebar")
+        column = QVBoxLayout(container)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self._build_case_header())
+
         if self.db is None:
             self.case_tree = None
-            return
+            self.tag_panel = None
+            column.addStretch(1)
+        else:
+            self.case_tree = CaseTree()
+            self.case_tree.source_activated.connect(self._activate_source)
+            self.case_tree.source_remove.connect(self._remove_source)
+            self.case_tree.source_hash.connect(self._hash_source)
+            self.case_tree.add_source.connect(self._open_image_dialog)
+            self.case_tree.result_opened.connect(self._open_stored_result)
+            self.case_tree.result_deleted.connect(self._delete_stored_result)
+            self.case_tree.bookmark_activated.connect(self._show_bookmark)
+            self.case_tree.bookmark_deleted.connect(self._delete_bookmark)
 
-        self.case_tree = CaseTree()
-        self.case_tree.source_activated.connect(self._activate_source)
-        self.case_tree.source_remove.connect(self._remove_source)
-        self.case_tree.source_hash.connect(self._hash_source)
-        self.case_tree.add_source.connect(self._open_image_dialog)
-        self.case_tree.result_opened.connect(self._open_stored_result)
-        self.case_tree.result_deleted.connect(self._delete_stored_result)
-        self.case_tree.bookmark_activated.connect(self._show_bookmark)
-        self.case_tree.bookmark_deleted.connect(self._delete_bookmark)
+            self.tag_panel = TagPanel()
+            self.tag_panel.tag_created.connect(self._new_tag)
+            self.tag_panel.tag_renamed.connect(self._rename_tag)
+            self.tag_panel.tag_recoloured.connect(self._recolour_tag)
+            self.tag_panel.tag_deleted.connect(self._delete_tag)
+            self.tag_panel.finding_activated.connect(self._goto_finding)
+            self.tag_panel.finding_deleted.connect(self._delete_bookmark)
+            self.tag_panel.finding_untagged.connect(self._untag_finding)
 
-        self.tag_panel = TagPanel()
-        self.tag_panel.tag_created.connect(self._new_tag)
-        self.tag_panel.tag_renamed.connect(self._rename_tag)
-        self.tag_panel.tag_recoloured.connect(self._recolour_tag)
-        self.tag_panel.tag_deleted.connect(self._delete_tag)
-        self.tag_panel.finding_activated.connect(self._goto_finding)
-        self.tag_panel.finding_deleted.connect(self._delete_bookmark)
-        self.tag_panel.finding_untagged.connect(self._untag_finding)
-
-        # The case explorer and the tag index are both navigation, so they share
-        # one dock; the splitter lets an examiner give whichever they are living
-        # in the room, instead of the layout deciding for them.
-        explorer = QSplitter(Qt.Orientation.Vertical)
-        explorer.addWidget(self.case_tree)
-        explorer.addWidget(self.tag_panel)
-        explorer.setStretchFactor(0, 3)
-        explorer.setStretchFactor(1, 2)
-        explorer.setChildrenCollapsible(False)
+            # The case explorer and the tag index are both navigation, so they
+            # share one sidebar; the splitter lets an examiner give whichever
+            # they are living in the room, instead of the layout deciding.
+            explorer = QSplitter(Qt.Orientation.Vertical)
+            explorer.addWidget(self.case_tree)
+            explorer.addWidget(self.tag_panel)
+            explorer.setStretchFactor(0, 3)
+            explorer.setStretchFactor(1, 2)
+            explorer.setChildrenCollapsible(False)
+            column.addWidget(explorer, 1)
 
         dock = QDockWidget("Case", self)
         dock.setObjectName("caseDock")
-        dock.setWidget(explorer)
+        dock.setWidget(container)
         dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
@@ -230,9 +244,12 @@ class MainWindow(QMainWindow):
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
+        # The dock's own title bar would repeat what the case header already
+        # says, one line above it.
+        dock.setTitleBarWidget(QWidget())
         self.case_dock = dock
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
-        dock.setMinimumWidth(240)
+        dock.setMinimumWidth(248)
         self._refresh_case_tree()
 
     def _refresh_case_tree(self):
@@ -247,7 +264,8 @@ class MainWindow(QMainWindow):
                 bookmarks,
                 active_source_id=self.active_source_id,
             )
-            self.tag_panel.refresh(tags, bookmarks)
+            if self.tag_panel is not None:
+                self.tag_panel.refresh(tags, bookmarks)
             for panel in self._result_panels():
                 panel.set_tags(tags)
         except Exception as exc:
@@ -427,6 +445,12 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        palette_action = QAction("Command Palette…", self)
+        palette_action.setShortcut("Ctrl+Shift+P")
+        palette_action.triggered.connect(self.open_command_palette)
+        file_menu.insertAction(file_menu.actions()[0], palette_action)
+        file_menu.insertSeparator(file_menu.actions()[1])
+
         view_menu = bar.addMenu("&View")
         theme_action = QAction("Toggle Theme", self)
         theme_action.setShortcut("Ctrl+T")
@@ -437,14 +461,6 @@ class MainWindow(QMainWindow):
         search_action.setShortcut("Ctrl+P")
         search_action.triggered.connect(lambda: self.ribbon.focus_search())
         view_menu.addAction(search_action)
-
-        self.density_action = QAction("Large Plugin Tiles", self)
-        self.density_action.setCheckable(True)
-        self.density_action.setShortcut("Ctrl+Shift+D")
-        self.density_action.toggled.connect(
-            lambda large: self.ribbon.set_compact(not large)
-        )
-        view_menu.addAction(self.density_action)
 
         identify_action = QAction("Re-identify Image", self)
         identify_action.triggered.connect(self._start_os_probe)
@@ -472,55 +488,51 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
 
-    def _build_topbar(self) -> QWidget:
-        bar = QWidget()
-        bar.setObjectName("topBar")
-        bar.setFixedHeight(54)
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(20, 0, 20, 0)
-        row.setSpacing(12)
+    def _build_case_header(self) -> QWidget:
+        """
+        Who and what, at the top of the sidebar: the case, the image it is
+        working on, and what that image turned out to be.
 
-        logo = QLabel("DumpScope")
-        logo.setObjectName("appLogo")
+        These three facts used to sit in a title bar beside the product name.
+        They belong here — the sidebar is where the case is navigated, so the
+        case identifies itself at the head of it.
+        """
+        header = QWidget()
+        header.setObjectName("caseHeader")
+        column = QVBoxLayout(header)
+        column.setContentsMargins(12, 10, 10, 10)
+        column.setSpacing(5)
 
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.VLine)
-        separator.setFixedWidth(1)
-
+        title_row = QHBoxLayout()
+        title_row.setSpacing(7)
+        self.os_glyph = QLabel()
+        self.os_glyph.setObjectName("osGlyph")
+        self.os_glyph.setFixedWidth(18)
         self.case_tag = QLabel(self.case.case_name)
-        self.case_tag.setObjectName("caseTag")
+        self.case_tag.setObjectName("caseNameLabel")
+        self.case_tag.setWordWrap(True)
+        title_row.addWidget(self.os_glyph, 0, Qt.AlignmentFlag.AlignTop)
+        title_row.addWidget(self.case_tag, 1)
 
-        image_path = self.case.image_path
         self.image_lbl = QLabel()
         self.image_lbl.setObjectName("imageLabel")
         self.image_lbl.setProperty("loaded", "false")
-        self._set_image_label(image_path)
+        self._set_image_label(self.case.image_path)
 
-        self.os_glyph = QLabel()
-        self.os_glyph.setObjectName("osGlyph")
         self.os_badge = QLabel()
         self.os_badge.setObjectName("osBadge")
 
-        symbols_btn = QPushButton("Symbols && YARA")
-        symbols_btn.setFixedWidth(140)
-        symbols_btn.clicked.connect(self._open_symbol_manager)
+        badge_row = QHBoxLayout()
+        badge_row.setSpacing(6)
+        badge_row.addWidget(self.os_badge)
+        badge_row.addStretch()
 
-        self.theme_btn = QPushButton("Light" if self.is_dark else "Dark")
-        self.theme_btn.setFixedWidth(84)
-        self.theme_btn.clicked.connect(self.toggle_theme)
-
-        row.addWidget(logo)
-        row.addWidget(separator)
-        row.addWidget(self.case_tag)
-        row.addWidget(self.image_lbl)
-        row.addWidget(self.os_glyph)
-        row.addWidget(self.os_badge)
-        row.addStretch()
-        row.addWidget(symbols_btn)
-        row.addWidget(self.theme_btn)
+        column.addLayout(title_row)
+        column.addWidget(self.image_lbl)
+        column.addLayout(badge_row)
 
         self._update_os_badge()
-        return bar
+        return header
 
     def _build_overview_tab(self) -> QWidget:
         """
@@ -808,8 +820,9 @@ class MainWindow(QMainWindow):
         self.profile = profile
         if profile.os:
             self.set_os(profile.os)
-        else:
-            self._update_os_badge()
+        # set_os is a no-op when the sniff already chose this OS, so the badge
+        # is refreshed unconditionally — otherwise it stays on "Identifying…".
+        self._update_os_badge()
         self._refresh_image_facts()
         if profile.confidence == "assumed":
             self._show_status(
@@ -849,8 +862,9 @@ class MainWindow(QMainWindow):
         )
 
     def _set_badge_probing(self):
+        # No setPixmap here: a QLabel shows a pixmap *or* text, and handing it
+        # even a null pixmap drops the text it was showing.
         self.os_badge.setText("Identifying…")
-        self.os_badge.setPixmap(QPixmap())
         self.os_badge.setProperty("os", "")
         self.os_badge.setProperty("probing", "true")
         restyle(self.os_badge)
@@ -1470,12 +1484,12 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self):
         QApplication.instance().setStyleSheet(build_theme(dark=self.is_dark))
-        self.theme_btn.setText("Light" if self.is_dark else "Dark")
         # Tiles and badges are styled by property, so the new sheet reaches them
         # without any per-widget work — but Qt needs telling to re-evaluate the
         # property-driven rules.
         icons.clear_cache()
         self._update_os_badge()
+        self.ribbon.set_dark(self.is_dark)
         self.ribbon.repaint_glyphs()
         if getattr(self, "case_tree", None) is not None:
             self.case_tree.apply_theme(self.is_dark)
@@ -1488,6 +1502,82 @@ class MainWindow(QMainWindow):
                 widget.apply_theme(self.is_dark)
         self.case.is_dark = self.is_dark
         self.case.save()
+
+    # ── Command palette ───────────────────────────────────────────────────────
+
+    def open_command_palette(self):
+        """Everything the window can do, searchable, over the keyboard."""
+        from ui.command_palette import CommandPalette
+
+        dialog = CommandPalette(self._commands(), parent=self, is_dark=self.is_dark)
+        dialog.exec()
+
+    def _commands(self) -> list:
+        """
+        The palette's contents: the window's own verbs first, then every plugin
+        that can be run against the current image.
+
+        Built fresh on each open rather than cached, because most of it depends
+        on state — which OS the ribbon is scoped to, whether an image is
+        loaded, which tags exist.
+        """
+        from ui.command_palette import Command
+
+        commands: list[Command] = [
+            Command("Open Image…", self._open_image_dialog, group="File",
+                    shortcut="Ctrl+O", glyph="disk", keywords="load memory dump"),
+            Command("Export Current Results…", self._export_current, group="File",
+                    shortcut="Ctrl+E", glyph="download", keywords="csv json save"),
+            Command("Generate Case Report…", self._generate_report, group="File",
+                    shortcut="Ctrl+R", glyph="news"),
+            Command("Open Case Folder", self._reveal_case_folder, group="File",
+                    glyph="box"),
+            Command("Close Case", self._close_case, group="File",
+                    shortcut="Ctrl+W", glyph="lock"),
+            Command("Toggle Light / Dark Theme", self.toggle_theme, group="View",
+                    shortcut="Ctrl+T", glyph="sun" if self.is_dark else "moon"),
+            Command("Search Plugins", self.ribbon.focus_search, group="View",
+                    shortcut="Ctrl+P", glyph="search"),
+            Command("Large Plugin Tiles", lambda: self.ribbon.set_compact(False),
+                    group="View", glyph="layers", keywords="density comfortable big"),
+            Command("Compact Plugin Tiles", lambda: self.ribbon.set_compact(True),
+                    group="View", glyph="layers", keywords="density small dense"),
+            Command("Go to Case Tab", lambda: self.tabs.setCurrentIndex(0),
+                    group="View", glyph="badge", keywords="details examiner notes"),
+            Command("Re-identify Image", self._start_os_probe, group="Image",
+                    glyph="target", keywords="detect os profile probe"),
+            Command("Compute Hashes", self._hash_active_source, group="Image",
+                    glyph="key", keywords="md5 sha256 integrity"),
+            Command("Symbols & YARA…", self._open_symbol_manager, group="Tools",
+                    glyph="braces", keywords="isf pdb rules download"),
+            Command("Refresh Plugin List", self._refresh_registry, group="Tools",
+                    glyph="shuffle", keywords="reload volatility introspect"),
+            Command("New Tag…", self._new_tag, group="Tags", glyph="tag"),
+        ]
+        for os_name, (glyph, label) in OS_BADGES.items():
+            commands.append(Command(
+                f"Show {label} Plugins", lambda name=os_name: self.set_os(name, manual=True),
+                group="View", glyph=glyph, keywords="operating system scope",
+            ))
+
+        # Plugins last so a bare query still surfaces the window's own verbs
+        # first; the ranking puts an exact plugin name above them anyway.
+        for info in self.registry.for_os(self.current_os or DEFAULT_OS):
+            commands.append(Command(
+                info.short_name,
+                lambda plugin_id=info.id: self._on_plugin_clicked(plugin_id),
+                subtitle=info.description or info.id,
+                group="Run",
+                glyph=icons.for_emoji(getattr(info, "icon", "")),
+                keywords=f"{info.id} {info.category}",
+            ))
+        return commands
+
+    def _reveal_case_folder(self):
+        if not self.case.directory:
+            self._show_status("Quick Analysis has no case folder.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.case.directory))
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
 

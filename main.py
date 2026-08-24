@@ -60,6 +60,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DumpScope")
     app.setOrganizationName("DumpScope Forensics")
+    _register_with_windows_shell()
 
     # Built before any window exists: the first inspection imports every
     # volatility3 plugin module and takes a few seconds, and doing it here means
@@ -89,6 +90,25 @@ def main():
         args.case = None
         args.analysis = False
         log.info("Case closed — returning to the case manager")
+
+
+def _register_with_windows_shell():
+    """
+    Claim a taskbar identity on Windows.
+
+    Without an explicit AppUserModelID the shell attributes the window to
+    python.exe, so DumpScope shares a taskbar button with every other Python
+    program running and cannot carry its own icon.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "DumpScope.Forensics.Analysis.1"
+        )
+    except Exception:                       # nothing here is worth failing over
+        logging.getLogger("dumpscope.main").debug("Could not set the app id")
 
 
 def _select_case(args, log):

@@ -15,13 +15,14 @@ worse way to find `malfind` than simply typing it.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from core.plugins import PluginInfo, PluginRegistry
+from ui import icons
 
 # Tall enough for the tiles plus the horizontal scrollbar underneath them;
 # too short and the scrollbar sits on top of the bottom row of labels.
@@ -33,6 +34,8 @@ class PluginRibbon(QWidget):
     """Emits a plugin id when one of its tiles is clicked."""
 
     plugin_clicked = pyqtSignal(str)
+    theme_toggled = pyqtSignal()
+    palette_requested = pyqtSignal()
 
     def __init__(self, registry: PluginRegistry, compact: bool = True, parent=None):
         super().__init__(parent)
@@ -43,7 +46,10 @@ class PluginRibbon(QWidget):
         self._buttons: dict[str, "PluginButton"] = {}
         self._groups: list[tuple[str, QWidget, list[str]]] = []
         self._dividers: list[QWidget] = []
+        self._icon_buttons: list[QPushButton] = []
+        self._is_dark = True
         self._build()
+        self._paint_icon_buttons()
 
     # ── Construction ──────────────────────────────────────────────────────────
 
@@ -78,10 +84,10 @@ class PluginRibbon(QWidget):
     def _build_header(self) -> QWidget:
         header = QWidget()
         header.setObjectName("ribbonHeader")
-        header.setFixedHeight(30)
+        header.setFixedHeight(32)
         bar = QHBoxLayout(header)
-        bar.setContentsMargins(14, 0, 14, 0)
-        bar.setSpacing(8)
+        bar.setContentsMargins(14, 0, 10, 0)
+        bar.setSpacing(6)
 
         self.scope_lbl = QLabel("No image loaded")
         self.scope_lbl.setObjectName("ribbonHeading")
@@ -94,16 +100,52 @@ class PluginRibbon(QWidget):
         self.search.setFixedHeight(24)
         self.search.textChanged.connect(self._apply_filter)
 
-        self.density_btn = QPushButton("Compact" if self._compact else "Large")
-        self.density_btn.setFixedSize(92, 22)
-        self.density_btn.setToolTip("Switch between compact and large plugin tiles")
-        self.density_btn.clicked.connect(lambda: self.set_compact(not self._compact))
+        # The density toggle is gone: the tiles are compact by default and the
+        # glyphs are vectors, so there is nothing a "large" mode reveals that
+        # the compact one hides.
+        self.palette_btn = self._icon_button(
+            "command", "All commands  (Ctrl+Shift+P)")
+        self.palette_btn.clicked.connect(self.palette_requested)
+        self.theme_btn = self._icon_button("moon", "Switch to the light theme")
+        self.theme_btn.clicked.connect(self.theme_toggled)
 
         bar.addWidget(self.scope_lbl)
         bar.addStretch()
         bar.addWidget(self.search)
-        bar.addWidget(self.density_btn)
+        bar.addWidget(self.palette_btn)
+        bar.addWidget(self.theme_btn)
         return header
+
+    def _icon_button(self, glyph: str, tooltip: str) -> QPushButton:
+        button = QPushButton()
+        button.setObjectName("iconButton")
+        button.setFixedSize(26, 24)
+        button.setToolTip(tooltip)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setProperty("glyph", glyph)
+        self._icon_buttons.append(button)
+        return button
+
+    def set_dark(self, is_dark: bool):
+        """Point the theme button at the theme it switches *to*."""
+        self._is_dark = is_dark
+        self.theme_btn.setProperty("glyph", "moon" if is_dark else "sun")
+        self.theme_btn.setToolTip(
+            "Switch to the light theme" if is_dark else "Switch to the dark theme"
+        )
+        self._paint_icon_buttons()
+
+    def _paint_icon_buttons(self):
+        from ui.theme import palette
+
+        colour = palette(dark=self._is_dark)["text_dim"]
+        ratio = self.devicePixelRatioF() or 1.0
+        for button in self._icon_buttons:
+            button.setIcon(icons.icon(
+                button.property("glyph") or "target", size=15,
+                color=colour, ratio=ratio,
+            ))
+            button.setIconSize(QSize(15, 15))
 
     # ── Population ────────────────────────────────────────────────────────────
 
@@ -225,12 +267,12 @@ class PluginRibbon(QWidget):
         """Re-render every tile's glyph, after a palette change."""
         for button in self._buttons.values():
             button._paint_glyph()
+        self._paint_icon_buttons()
 
     def set_compact(self, compact: bool):
         if compact == self._compact:
             return
         self._compact = compact
-        self.density_btn.setText("Compact" if compact else "Large")
         for button in self._buttons.values():
             button.set_compact(compact)
         self._apply_height()
