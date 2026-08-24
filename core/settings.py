@@ -25,6 +25,14 @@ DEFAULTS = {
     "mono_font": "",
     "font_size": 13,            # the base size every other size scales from
     "desktop_notifications": True,
+    # SMTP, for emailing a finished report. The password is deliberately absent:
+    # it is asked for at send time and never written down.
+    "smtp_host": "",
+    "smtp_port": 587,
+    "smtp_user": "",
+    "smtp_from": "",
+    "smtp_security": "starttls",
+    "report_include_output": True,
 }
 
 _cache: dict | None = None

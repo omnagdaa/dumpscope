@@ -27,7 +27,7 @@ from core.database import Database
 from core.plugins import PluginRegistry, build_command_args
 from core.os_detect import ImageProbe, ImageProfile
 from core.vol_runner import RunSpec, VolatilityRunner
-from core.hash_worker import HashWorker
+from core.hash_worker import FileHasher, HashWorker
 from core.report import write_report
 from ui.bookmark_dialog import BookmarkDialog
 from ui.case_tree import CaseTree
@@ -74,6 +74,8 @@ class MainWindow(QMainWindow):
 
         self._runners: dict[str, VolatilityRunner] = {}
         self._run_started: dict[str, float] = {}
+        self._extract_context: dict[str, dict] = {}
+        self._hashers: list[FileHasher] = []
         # The high-water mark of concurrent runs, so a finished batch can
         # report on itself and then reset.
         self._batch_size = 0
@@ -458,6 +460,10 @@ class MainWindow(QMainWindow):
         report_action.setShortcut("Ctrl+R")
         report_action.triggered.connect(self._generate_report)
         file_menu.addAction(report_action)
+
+        email_action = QAction("Email Report…", self)
+        email_action.triggered.connect(lambda: self._email_report())
+        file_menu.addAction(email_action)
 
         close_case_action = QAction("Close Case", self)
         close_case_action.setShortcut("Ctrl+W")
@@ -1076,12 +1082,21 @@ class MainWindow(QMainWindow):
         short = plugin_id.rsplit(".", 1)[-1]
         elapsed = self._elapsed(run_key)
 
-        if is_extraction and exit_code == 0 and not cancelled:
-            message = f"{rows} file(s) written to {self.dumps_dir}"
-            self._show_status(f"Extraction finished — {message}")
-            self.notifier.notify("Extraction finished", message, "success")
-            self._announce_idle()
-            return
+        if is_extraction:
+            written = self._record_extraction(run_key)
+            if exit_code == 0 and not cancelled:
+                message = (
+                    f"{len(written)} file(s) written to {self.dumps_dir}"
+                    if written else
+                    "volatility3 reported success but wrote no files."
+                )
+                self._show_status(f"Extraction finished — {message}")
+                self.notifier.notify(
+                    "Extraction finished", message,
+                    "success" if written else "warning",
+                )
+                self._announce_idle()
+                return
 
         if cancelled:
             self._show_status(f"{short} cancelled.")
@@ -1458,6 +1473,19 @@ class MainWindow(QMainWindow):
             extra_args=["--pid", pid, "--dump"],
             output_dir=target,
         )
+        # What is already there, so the files this run writes can be told from
+        # the files earlier runs wrote. vol3's manifest column is named
+        # differently by every plugin and says "Error outputting file" on
+        # failure; the folder itself is the only reliable account.
+        self._extract_context[run_key] = {
+            "before": _listing(target),
+            "kind": kind,
+            "pid": pid,
+            "process": _row_label(payload),
+            "plugin": plugin_id,
+            "dir": target,
+        }
+
         self._start_runner(run_key, spec, panel)
         if self.db is not None:
             self.db.log_action("extract", f"{what} PID {pid} -> {target}",
@@ -1465,7 +1493,14 @@ class MainWindow(QMainWindow):
         self._show_status(f"Extracting {what} for PID {pid}…")
 
     def _generate_report(self):
-        """Write an HTML or JSON case report into the case's reports folder."""
+        """
+        Write the case report: what was examined, what was run, what was found,
+        and every file extracted out of the image.
+
+        The analysis output itself is included by default (capped per plugin,
+        with the full set left in the CSV exports), because a report that only
+        lists which plugins were run is a table of contents, not a record.
+        """
         if self.db is None:
             QMessageBox.information(
                 self, "No Case",
@@ -1486,11 +1521,15 @@ class MainWindow(QMainWindow):
             return
 
         fmt = "json" if path.lower().endswith(".json") else "html"
+        results = self.db.get_results()
+        extractions = self.db.get_extractions()
+        outputs = self._report_outputs(results)
         try:
             write_report(
                 path, self.case,
-                self.db.get_data_sources(), self.db.get_results(),
+                self.db.get_data_sources(), results,
                 self.db.get_bookmarks(), self.db.get_audit_log(), fmt=fmt,
+                extractions=extractions, outputs=outputs,
             )
             self.db.log_action("report_generated", path, self.case.examiner_name)
         except OSError as exc:
@@ -1498,13 +1537,96 @@ class MainWindow(QMainWindow):
             return
 
         self._refresh_case_tree()
-        answer = QMessageBox.question(
-            self, "Report Generated",
-            f"Written to:\n{path}\n\nOpen it now?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        self.notifier.notify(
+            "Report generated",
+            f"{len(results)} run(s), {len(extractions)} extracted file(s).",
+            "success",
         )
-        if answer == QMessageBox.StandardButton.Yes:
+        self._offer_report(path)
+
+    def _report_outputs(self, results: list[dict]) -> dict:
+        """
+        {result id: {columns, rows}} for the runs whose output goes in the
+        report. Empty when the examiner has turned the output sections off,
+        which is what makes a hundred-megabyte case produce a readable file.
+        """
+        if not self.settings.get("report_include_output", True) or self.db is None:
+            return {}
+        outputs = {}
+        for result in results:
+            try:
+                stored = self.db.load_result(result["id"])
+            except Exception as exc:
+                log.warning("Could not read result %s: %s", result.get("id"), exc)
+                continue
+            if stored:
+                outputs[result["id"]] = stored
+        return outputs
+
+    def _offer_report(self, path: str):
+        """Written — now open it, send it, or neither."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Report Generated")
+        box.setText(f"Written to:\n{path}")
+        open_btn = box.addButton("Open", QMessageBox.ButtonRole.AcceptRole)
+        email_btn = box.addButton("Email…", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is open_btn:
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        elif clicked is email_btn:
+            self._email_report(path)
+
+    def _email_report(self, path: str = ""):
+        """
+        Send a report to whoever the case says it is for.
+
+        Extracted files are offered as optional attachments and start
+        unchecked: a process dump is potentially live malware, and attaching
+        one to an email should always be a decision.
+        """
+        from ui.email_dialog import EmailReportDialog
+
+        if not path:
+            path = self._latest_report()
+            if not path:
+                QMessageBox.information(
+                    self, "No Report",
+                    "Generate a report first (File → Generate Case Report).",
+                )
+                return
+
+        extras = []
+        if self.db is not None:
+            extras = [
+                item["path"] for item in self.db.get_extractions()
+                if not item.get("missing")
+            ]
+
+        dialog = EmailReportDialog(self.case, path, extras=extras, parent=self)
+        dialog.sent.connect(lambda: self._on_report_sent(path, dialog))
+        dialog.exec()
+
+    def _on_report_sent(self, path: str, dialog):
+        recipients = ", ".join(dialog.message().recipients())
+        if self.db is not None:
+            self.db.log_action("report_emailed", f"{path} -> {recipients}",
+                               self.case.examiner_name)
+        self._refresh_case_tree()
+        self.notifier.notify("Report sent", recipients, "success")
+
+    def _latest_report(self) -> str:
+        """The most recently written report in the case, if there is one."""
+        folder = self.case.reports_dir if self.case.directory else ""
+        if not folder or not os.path.isdir(folder):
+            return ""
+        reports = [
+            os.path.join(folder, name) for name in os.listdir(folder)
+            if name.lower().endswith((".html", ".json"))
+        ]
+        return max(reports, key=os.path.getmtime, default="")
 
     def _close_case(self):
         """Return to the case manager without leaving the application."""
@@ -1591,6 +1713,50 @@ class MainWindow(QMainWindow):
         self.case.is_dark = self.is_dark
         self.case.save()
 
+    def _record_extraction(self, run_key: str) -> list[str]:
+        """
+        Register the files an extraction wrote, and hash them.
+
+        Returns the new paths. Hashing runs in the background: a full process
+        memory dump can be gigabytes, and hashing one on the GUI thread would
+        freeze the window for as long as it took.
+        """
+        context = self._extract_context.pop(run_key, None)
+        if context is None:
+            return []
+        target = context["dir"]
+        written = sorted(_listing(target) - context["before"])
+        paths = [os.path.join(target, name) for name in written]
+        if not paths or self.db is None:
+            return paths
+
+        for path in paths:
+            try:
+                self.db.record_extraction(
+                    path, plugin=context["plugin"], kind=context["kind"],
+                    pid=context["pid"], process=context["process"],
+                    source_id=self.active_source_id,
+                )
+            except Exception as exc:
+                log.warning("Could not record %s: %s", path, exc)
+
+        hasher = FileHasher(paths, parent=self)
+        hasher.hashed.connect(self._on_extraction_hashed)
+        hasher.all_done.connect(
+            lambda count: self._show_status(f"Hashed {count} extracted file(s).")
+        )
+        hasher.finished.connect(lambda h=hasher: self._hashers.remove(h)
+                                if h in self._hashers else None)
+        hasher.finished.connect(hasher.deleteLater)
+        self._hashers.append(hasher)
+        hasher.start()
+        self._refresh_case_tree()
+        return paths
+
+    def _on_extraction_hashed(self, path: str, sha256: str, _size: int):
+        if self.db is not None:
+            self.db.set_extraction_hash(path, sha256)
+
     # ── Fonts ─────────────────────────────────────────────────────────────────
 
     def _choose_ui_font(self):
@@ -1635,6 +1801,14 @@ class MainWindow(QMainWindow):
                   int(self.settings.get("font_size") or BASE_FONT_SIZE))
         self.apply_theme()
 
+    def _toggle_report_output(self):
+        enabled = not self.settings.get("report_include_output", True)
+        self.settings = settings.save(report_include_output=enabled)
+        self._show_status(
+            "Reports will include the analysis output." if enabled else
+            "Reports will list the runs only, without their rows."
+        )
+
     def _set_desktop_notifications(self, enabled: bool):
         self.settings = settings.save(desktop_notifications=bool(enabled))
         self.notifier.set_desktop_enabled(bool(enabled))
@@ -1670,8 +1844,13 @@ class MainWindow(QMainWindow):
                     shortcut="Ctrl+E", glyph="download", keywords="csv json save"),
             Command("Generate Case Report…", self._generate_report, group="File",
                     shortcut="Ctrl+R", glyph="news"),
+            Command("Email Report…", lambda: self._email_report(), group="File",
+                    glyph="link", keywords="send smtp mail recipient examiner"),
             Command("Open Case Folder", self._reveal_case_folder, group="File",
                     glyph="box"),
+            Command("Include Analysis Output in Reports",
+                    lambda: self._toggle_report_output(), group="File",
+                    glyph="list", keywords="rows tables full detail"),
             Command("Close Case", self._close_case, group="File",
                     shortcut="Ctrl+W", glyph="lock"),
             Command("Toggle Light / Dark Theme", self.toggle_theme, group="View",
@@ -1752,6 +1931,15 @@ class MainWindow(QMainWindow):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _listing(directory: str) -> set[str]:
+    """The file names directly inside `directory`. Empty if it cannot be read."""
+    try:
+        with os.scandir(directory) as entries:
+            return {entry.name for entry in entries if entry.is_file()}
+    except OSError:
+        return set()
+
 
 def _row_label(row: dict) -> str:
     """

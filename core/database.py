@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("dumpscope.database")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cases (
@@ -101,6 +101,27 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_audit_case ON audit_log (case_id);
+
+-- v5. Files carved out of the image by a plugin --dump run. The folder is the
+-- ground truth for what exists; this table is what is known *about* each file:
+-- which process it came from, which run wrote it, and its hash at the time it
+-- was written.
+CREATE TABLE IF NOT EXISTS extracted_files (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id    INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+    source_id  INTEGER,
+    plugin     TEXT NOT NULL,
+    kind       TEXT DEFAULT '',
+    pid        TEXT DEFAULT '',
+    process    TEXT DEFAULT '',
+    path       TEXT NOT NULL,
+    filename   TEXT DEFAULT '',
+    size_bytes INTEGER DEFAULT 0,
+    sha256     TEXT DEFAULT '',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (case_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_extracted_case ON extracted_files (case_id);
 
 CREATE TABLE IF NOT EXISTS tags (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -665,6 +686,73 @@ class Database:
             (self.case_id, action, detail, examiner,
              datetime.now(timezone.utc).isoformat(timespec="seconds")),
         )
+
+    # ── Extracted files ───────────────────────────────────────────────────────
+
+    def record_extraction(self, path: str, plugin: str, kind: str = "",
+                          pid: str = "", process: str = "",
+                          source_id: int | None = None) -> int | None:
+        """
+        Note a file a plugin wrote. Idempotent per path.
+
+        The size is read from disk rather than passed in, so the record cannot
+        disagree with the file. The hash is filled in afterwards by
+        `set_extraction_hash`, because hashing a multi-gigabyte process dump
+        cannot happen on the GUI thread.
+        """
+        if self.case_id is None:
+            return None
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        with self._connect() as conn:
+            cursor = conn.execute("""
+                INSERT INTO extracted_files
+                    (case_id, source_id, plugin, kind, pid, process, path,
+                     filename, size_bytes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (case_id, path) DO UPDATE SET
+                    size_bytes = excluded.size_bytes,
+                    plugin = excluded.plugin,
+                    kind = excluded.kind,
+                    pid = excluded.pid,
+                    process = excluded.process
+                RETURNING id
+            """, (self.case_id, source_id, plugin, kind, str(pid), process,
+                  os.path.abspath(path), os.path.basename(path), size))
+            row = cursor.fetchone()
+        return row["id"] if row else None
+
+    def set_extraction_hash(self, path: str, sha256: str) -> None:
+        if self.case_id is None:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE extracted_files SET sha256 = ? WHERE case_id = ? AND path = ?",
+                (sha256, self.case_id, os.path.abspath(path)),
+            )
+
+    def get_extractions(self) -> list[dict]:
+        """Every file extracted in this case, newest first, with a `missing` flag."""
+        if self.case_id is None:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT e.*, d.display_name AS source_name
+                FROM extracted_files e
+                LEFT JOIN data_sources d ON d.id = e.source_id
+                WHERE e.case_id = ?
+                ORDER BY e.created_at DESC, e.id DESC
+            """, (self.case_id,)).fetchall()
+        records = []
+        for row in rows:
+            record = dict(row)
+            # A file can be moved or deleted outside the app; a report that
+            # claims it is there would be wrong.
+            record["missing"] = not os.path.exists(record["path"])
+            records.append(record)
+        return records
 
     def log_action(self, action: str, detail: str = "", examiner: str = ""):
         with self._connect() as conn:
