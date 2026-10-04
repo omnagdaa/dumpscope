@@ -24,3 +24,23 @@ def stub_vol(monkeypatch):
     import core.vol_runner as vol_runner
     monkeypatch.setattr(vol_runner, "find_vol3_command", lambda: [sys.executable, STUB])
     return STUB
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(monkeypatch, tmp_path_factory):
+    """
+    Every test gets its own config directory and a fresh run gate.
+
+    Without this, any test that opens a window writes settings and the
+    recent-case list into the developer's real ~/.config/dumpscope, and one
+    test raising the parallel-run limit leaks it into the next.
+    """
+    from core import settings
+    from core.vol_runner import RUN_GATE
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("config")))
+    settings._cache = None
+    RUN_GATE.set_limit(1)
+    yield
+    settings._cache = None
+    RUN_GATE.set_limit(1)
