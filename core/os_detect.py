@@ -35,8 +35,8 @@ from dataclasses import dataclass, field
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.vol_runner import (
-    RUN_GATE, _creation_flags, build_environment, detect_os_from_banner,
-    find_vol3_command,
+    RUN_GATE, _creation_flags, build_environment, case_symbol_args,
+    detect_os_from_banner, find_vol3_command,
 )
 
 log = logging.getLogger("dumpscope.os_detect")
@@ -190,10 +190,15 @@ class ImageProbe(QThread):
     INFO_TIMEOUT = 180
     BANNER_TIMEOUT = 300
 
-    def __init__(self, image_path: str, symbol_dirs: list[str] | None = None, parent=None):
+    def __init__(self, image_path: str, symbol_dirs: list[str] | None = None,
+                 parent=None, cache_dir: str = ""):
         super().__init__(parent)
         self.image_path = image_path
         self.symbol_dirs = symbol_dirs or []
+        # With case symbol folders, windows.info is also what fetches this
+        # image's kernel PDB: vol3 downloads it and writes the ISF into the
+        # first symbol folder, which is the case's.
+        self.cache_dir = cache_dir
         self._proc: subprocess.Popen | None = None
         self._cancelled = False
 
@@ -263,7 +268,8 @@ class ImageProbe(QThread):
         ))
 
     def _probe_windows(self, path: str) -> ImageProfile | None:
-        command = find_vol3_command() + [
+        command = find_vol3_command() + case_symbol_args(
+            self.symbol_dirs, self.cache_dir) + [
             "-q", "-r", "csv", "-f", path, "windows.info.Info",
         ]
         try:
@@ -293,7 +299,8 @@ class ImageProbe(QThread):
         return None
 
     def _probe_banners(self, path: str) -> ImageProfile | None:
-        command = find_vol3_command() + [
+        command = find_vol3_command() + case_symbol_args(
+            self.symbol_dirs, self.cache_dir) + [
             "-q", "-r", "csv", "-f", path, "banners.Banners",
         ]
         try:
@@ -321,6 +328,9 @@ class ImageProbe(QThread):
         """
         if not RUN_GATE.acquire(cancelled=lambda: self._cancelled):
             raise RuntimeError("cancelled while queued")
+        for folder in [self.cache_dir, *self.symbol_dirs]:
+            if folder:
+                os.makedirs(folder, exist_ok=True)
         try:
             proc = subprocess.Popen(
                 command,

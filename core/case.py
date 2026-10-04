@@ -6,7 +6,9 @@ A case is a folder, not a loose collection of settings:
     <case dir>/
         case.json      portable metadata, readable without the app
         <name>.db      results, bookmarks, tags, audit trail
-        symbols/       ISF tables scoped to this case
+        symbols/       ISF tables scoped to this case, including the ones
+                       volatility3 builds from PDBs it downloads for this image
+        cache/         volatility3's identifier cache for this case
         yara/          rules
         exports/       CSV/JSON pulled out of result tables
         dumps/         files carved by plugins
@@ -33,7 +35,7 @@ from core.paths import config_dir
 log = logging.getLogger("dumpscope.case")
 
 CASE_FILE = "case.json"
-CASE_SUBDIRS = ("symbols", "yara", "exports", "dumps", "reports", "logs")
+CASE_SUBDIRS = ("symbols", "cache", "yara", "exports", "dumps", "reports", "logs")
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -94,6 +96,14 @@ class Case:
     @property
     def symbols_dir(self) -> str:
         return self.subdir("symbols")
+
+    @property
+    def vol_cache_dir(self) -> str:
+        return self.subdir("cache")
+
+    @property
+    def dumps_dir(self) -> str:
+        return self.subdir("dumps")
 
     @property
     def yara_dir(self) -> str:

@@ -430,6 +430,29 @@ class Database:
             "created_at": row["created_at"],
         }
 
+    def latest_payloads(self, source_id: int | None = None) -> list[dict]:
+        """
+        The newest stored run of each plugin, newest first, as full payloads.
+
+        With `source_id`, only runs against that data source count — a
+        timeline mixing two machines' images would be meaningless. A run
+        whose stored JSON cannot be decoded is skipped, not fatal.
+        """
+        latest: dict[str, int] = {}
+        for result in self.get_results(source_id=source_id):
+            latest.setdefault(result["plugin"], result["id"])
+        payloads = []
+        for result_id in latest.values():
+            try:
+                payload = self.load_result(result_id)
+            except (ValueError, TypeError) as exc:
+                log.warning("Stored result %s is unreadable: %s", result_id, exc)
+                continue
+            if payload:
+                payload["id"] = result_id
+                payloads.append(payload)
+        return payloads
+
     def delete_result(self, result_id: int):
         with self._connect() as conn:
             row = conn.execute(

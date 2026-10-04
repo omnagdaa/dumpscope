@@ -2,7 +2,7 @@
 Case reporting.
 
 Produces a single self-contained HTML file: no external CSS, no fonts to fetch,
-nothing that breaks when the report is emailed or filed. A forensic report has
+nothing that breaks when the report is copied, archived or filed. A forensic report has
 to still render years later on a machine with no network, so everything is
 inlined.
 
@@ -69,6 +69,19 @@ footer {
   margin-top: 46px; padding-top: 14px; border-top: 1px solid #d8dee4;
   color: #6e7781; font-size: 12px;
 }
+.cards { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 8px; }
+.card {
+  flex: 1 1 140px; border: 1px solid #d8dee4; border-radius: 8px;
+  padding: 12px 14px; background: #f6f8fa;
+}
+.card .n { font-size: 24px; font-weight: 700; line-height: 1.1; }
+.card .l { color: #57606a; font-size: 12px; text-transform: uppercase; letter-spacing: .8px; }
+.sev {
+  display: inline-block; padding: 1px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 700; color: #fff; text-transform: uppercase;
+}
+.chart { width: 100%; height: auto; margin: 4px 0 6px; }
+a { color: #0969da; }
 @media print { body { padding: 0; } h2 { break-after: avoid; } }
 """
 
@@ -99,6 +112,19 @@ def _section(title: str, body: str) -> str:
     return f"<h2>{_e(title)}</h2>\n{body}"
 
 
+class _Raw(str):
+    """Cell content that is already HTML and must not be escaped again."""
+
+
+def _cell_html(value) -> str:
+    return value if isinstance(value, _Raw) else _e(value)
+
+
+def _href(path: str | None) -> str:
+    """A relative bundle path as a URL path: forward slashes on every OS."""
+    return (path or "").replace(os.sep, "/")
+
+
 def _table(headers: list[str], rows: list[list[str]], mono_columns=()) -> str:
     if not rows:
         return '<p class="muted">Nothing recorded.</p>'
@@ -109,7 +135,8 @@ def _table(headers: list[str], rows: list[list[str]], mono_columns=()) -> str:
     body = []
     for row in rows:
         cells = "".join(
-            f'<td class="mono">{_e(c)}</td>' if i in mono_columns else f"<td>{_e(c)}</td>"
+            f'<td class="mono">{_cell_html(c)}</td>' if i in mono_columns
+            else f"<td>{_cell_html(c)}</td>"
             for i, c in enumerate(row)
         )
         body.append(f"<tr>{cells}</tr>")
@@ -120,7 +147,10 @@ def build_html(case, sources: list[dict], results: list[dict],
                bookmarks: list[dict], audit: list[dict],
                include_audit: bool = True, extractions: list[dict] | None = None,
                outputs: dict | None = None,
-               max_rows: int = DEFAULT_MAX_ROWS) -> str:
+               max_rows: int = DEFAULT_MAX_ROWS,
+               insights: list | None = None,
+               timelines: list[tuple[str, list]] | None = None,
+               links: dict | None = None) -> str:
     """
     Render the case report. `case` is a core.case.Case.
 
@@ -129,8 +159,17 @@ def build_html(case, sources: list[dict], results: list[dict],
     reproduce the analysis output inline. Tables are capped at `max_rows` with
     the remainder pointed at the CSV export, because a report nobody can open
     is not a record of anything.
+
+    `insights` are core.insights.Finding objects; `timelines` is a list of
+    (data source label, [core.timeline.Event]) pairs. `links` maps parts of
+    the report to files beside it in a report bundle: {"results": {result id:
+    relative path}, "extractions": {absolute path: relative path},
+    "timeline": {label: relative path}, "insights": relative path}.
     """
     extractions = extractions or []
+    links = links or {}
+    insights = insights or []
+    timelines = [(label, events) for label, events in (timelines or []) if events]
     generated = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M %Z")
 
     meta_rows = [
@@ -218,8 +257,11 @@ def build_html(case, sources: list[dict], results: list[dict],
         label = item.get("filename") or os.path.basename(item.get("path", ""))
         if item.get("missing"):
             label += "  (no longer on disk)"
+        target = links.get("extractions", {}).get(item.get("path", ""))
+        label_html = (f'<a href="{_e(_href(target))}">{_e(label)}</a>'
+                      if target else _e(label))
         extraction_rows.append([
-            label,
+            _Raw(label_html),
             _EXTRACT_KINDS.get(item.get("kind") or "", item.get("kind") or "—"),
             item.get("pid") or "—",
             item.get("process") or "—",
@@ -256,7 +298,8 @@ def build_html(case, sources: list[dict], results: list[dict],
             payload = outputs.get(result.get("id"))
             if not payload:
                 continue
-            blocks.append(_result_block(result, payload, max_rows))
+            blocks.append(_result_block(result, payload, max_rows,
+                                        links.get("results", {}).get(result.get("id"))))
         if blocks:
             output_block = _section("Analysis Output", "".join(blocks))
 
@@ -280,8 +323,11 @@ def build_html(case, sources: list[dict], results: list[dict],
 </head><body><div class="wrap">
 <h1>{_e(case.case_name)}</h1>
 <p class="sub">DumpScope case report · generated {_e(generated)}</p>
+{_summary_block(sources, results, bookmarks, extractions, insights, timelines)}
 {_section("Case Details", meta)}
 {notes_block}
+{_insights_block(insights, links.get("insights"))}
+{_timeline_block(timelines, links.get("timeline", {}), max_rows)}
 {_section(f"Data Sources ({len(sources)})", sources_table)}
 {_section(f"Analysis Performed ({len(results)})", results_table)}
 {_section(f"Findings ({len(bookmarks)})", bookmarks_table)}
@@ -291,21 +337,22 @@ def build_html(case, sources: list[dict], results: list[dict],
 {output_block}
 {audit_block}
 <footer>
-Generated by DumpScope. Full result sets are exported separately as CSV/JSON
-alongside this report in the case's exports folder.
+Generated by DumpScope. {_e(links.get("footer") or "Full result sets are exported separately as CSV/JSON alongside this report.")}
 </footer>
 </div></body></html>"""
 
 
-def _result_block(result: dict, payload: dict, max_rows: int) -> str:
+def _result_block(result: dict, payload: dict, max_rows: int,
+                  csv_path: str | None = None) -> str:
     """One plugin's output, capped, under a heading naming the run."""
     columns = payload.get("columns") or []
     rows = payload.get("rows") or []
     shown = rows[:max_rows]
+    link = f" · <a href='{_e(_href(csv_path))}'>full CSV</a>" if csv_path else ""
     heading = (
         f"<h3>{_e(result.get('plugin'))} "
         f"<span class='muted'>· {_plural(len(rows), 'row')} · "
-        f"{_e(result.get('created_at') or '')}</span></h3>"
+        f"{_e(result.get('created_at') or '')}{link}</span></h3>"
     )
     more = (
         f'<p class="muted">Showing the first {len(shown):,} of {len(rows):,} '
@@ -317,8 +364,13 @@ def _result_block(result: dict, payload: dict, max_rows: int) -> str:
 
 def build_json(case, sources, results, bookmarks, audit,
                extractions: list[dict] | None = None,
-               outputs: dict | None = None) -> str:
+               outputs: dict | None = None,
+               insights: list | None = None,
+               timelines: list[tuple[str, list]] | None = None,
+               files: dict | None = None) -> str:
     """The same content as machine-readable JSON, for downstream tooling."""
+    from dataclasses import asdict
+    from core.timeline import format_time, summarise
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "case": case.to_dict(),
@@ -328,6 +380,23 @@ def build_json(case, sources, results, bookmarks, audit,
         "bookmarks": bookmarks,
         "audit_log": audit,
     }
+    if insights:
+        payload["insights"] = [asdict(f) for f in insights]
+    if timelines:
+        payload["timeline"] = {
+            label: {
+                "summary": summarise(events),
+                "events": [
+                    {"time": format_time(e.time), "type": e.kind, "pid": e.pid,
+                     "process": e.process, "description": e.summary,
+                     "detail": e.detail, "plugin": e.plugin}
+                    for e in events
+                ],
+            }
+            for label, events in timelines
+        }
+    if files:
+        payload["files"] = files
     if outputs:
         # Keyed by plugin rather than by row id: a JSON report is read by
         # something downstream, which knows plugins, not this case's ids.
@@ -356,3 +425,135 @@ def write_report(path: str, case, sources, results, bookmarks, audit,
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(content)
     return path
+
+
+# ── Summary, insights and timeline ────────────────────────────────────────────
+
+def _summary_block(sources, results, bookmarks, extractions, insights, timelines) -> str:
+    from core.insights import counts
+    tally = counts(insights)
+    events = sum(len(events) for _, events in timelines)
+    cards = [
+        (len(sources), "Data sources"),
+        (len(results), "Plugin runs"),
+        (tally.get("high", 0), "High-severity insights"),
+        (tally.get("medium", 0), "Medium insights"),
+        (events, "Timeline events"),
+        (len(bookmarks), "Bookmarked findings"),
+        (len(extractions), "Extracted files"),
+    ]
+    body = "<div class='cards'>" + "".join(
+        f"<div class='card'><div class='n'>{n:,}</div><div class='l'>{_e(label)}</div></div>"
+        for n, label in cards
+    ) + "</div>"
+    spans = []
+    for label, items in timelines:
+        spans.append(
+            f"<p class='muted'>{_e(label)}: activity from "
+            f"{_e(_fmt_time(items[0].time))} to {_e(_fmt_time(items[-1].time))}.</p>")
+    return _section("Summary", body + "".join(spans))
+
+
+def _insights_block(insights, csv_path) -> str:
+    if not insights:
+        return ""
+    from core.insights import SEVERITY_COLORS
+    rows = []
+    for finding in insights:
+        color = SEVERITY_COLORS.get(finding.severity, "#6e7781")
+        rows.append([
+            _Raw(f'<span class="sev" style="background:{color}">{_e(finding.severity)}</span>'),
+            finding.category, finding.title, finding.pid or "—",
+            finding.process or "—", finding.detail,
+        ])
+    link = (f"<p class='muted'>Also in <a href='{_e(_href(csv_path))}'>"
+            f"{_e(os.path.basename(csv_path))}</a>.</p>" if csv_path else "")
+    note = ("<p class='muted'>Automatic leads from the stored plugin output. Each "
+            "names the evidence behind it; confirm before relying on it.</p>")
+    return _section(f"Insights ({len(insights)})", note + _table(
+        ["Severity", "Category", "Finding", "PID", "Process", "Detail"], rows,
+        mono_columns={5}) + link)
+
+
+def _timeline_block(timelines, csv_links: dict, max_rows: int) -> str:
+    if not timelines:
+        return ""
+    from core.timeline import EVENT_COLUMNS
+    parts = []
+    for label, events in timelines:
+        csv_path = csv_links.get(label)
+        shown = events[:max_rows]
+        more = ""
+        if len(events) > len(shown):
+            more = (f"<p class='muted'>Showing the first {len(shown):,} of "
+                    f"{len(events):,} events"
+                    + (f"; all of them are in <a href='{_e(_href(csv_path))}'>"
+                       f"{_e(os.path.basename(csv_path))}</a>" if csv_path else "")
+                    + ".</p>")
+        elif csv_path:
+            more = (f"<p class='muted'>Also in <a href='{_e(_href(csv_path))}'>"
+                    f"{_e(os.path.basename(csv_path))}</a>.</p>")
+        parts.append(
+            f"<h3>{_e(label)} <span class='muted'>· {_plural(len(events), 'event')}</span></h3>"
+            + timeline_svg(events)
+            + _table(EVENT_COLUMNS, [e.as_row() for e in shown], mono_columns={0})
+            + more)
+    return _section("Incident Timeline", "".join(parts))
+
+
+def _fmt_time(moment) -> str:
+    from core.timeline import format_time
+    return format_time(moment)
+
+
+def timeline_svg(events: list, width: int = 960, height: int = 230,
+                 buckets: int = 60) -> str:
+    """
+    A stacked histogram of events over time, as inline SVG.
+
+    Inline rather than an image or a script so the report still renders with
+    no network and no JavaScript, and prints.
+    """
+    from core.timeline import KINDS, KIND_COLORS, KIND_LABELS, histogram, format_time
+    if not events:
+        return ""
+    start, end = events[0].time, events[-1].time
+    bins = histogram(events, start, end, buckets)
+    peak = max((sum(b.values()) for b in bins), default=0) or 1
+    left, right, top, bottom = 44, 10, 10, 58
+    plot_w, plot_h = width - left - right, height - top - bottom
+    bar_w = plot_w / len(bins)
+    order = [key for key, _, _ in KINDS]
+    shapes = []
+    for i, counter in enumerate(bins):
+        y = top + plot_h
+        for kind in order:
+            n = counter.get(kind, 0)
+            if not n:
+                continue
+            h = n / peak * plot_h
+            y -= h
+            shapes.append(
+                f'<rect x="{left + i * bar_w + 0.5:.1f}" y="{y:.1f}" '
+                f'width="{max(bar_w - 1, 1):.1f}" height="{h:.1f}" '
+                f'fill="{KIND_COLORS[kind]}"><title>{_e(KIND_LABELS[kind])}: {n}</title></rect>')
+    axis = (
+        f'<line x1="{left}" y1="{top + plot_h}" x2="{width - right}" y2="{top + plot_h}" '
+        'stroke="#8c959f"/>'
+        f'<text x="{left - 6}" y="{top + 10}" text-anchor="end" font-size="11" fill="#57606a">{peak}</text>'
+        f'<text x="{left - 6}" y="{top + plot_h}" text-anchor="end" font-size="11" fill="#57606a">0</text>'
+        f'<text x="{left}" y="{top + plot_h + 16}" font-size="11" fill="#57606a">{_e(format_time(start))}</text>'
+        f'<text x="{width - right}" y="{top + plot_h + 16}" text-anchor="end" font-size="11" '
+        f'fill="#57606a">{_e(format_time(end))}</text>'
+    )
+    present = [key for key in order if any(b.get(key) for b in bins)]
+    legend = []
+    x = left
+    for key in present:
+        legend.append(
+            f'<rect x="{x}" y="{height - 22}" width="10" height="10" fill="{KIND_COLORS[key]}"/>'
+            f'<text x="{x + 14}" y="{height - 13}" font-size="11" fill="#57606a">{_e(KIND_LABELS[key])}</text>')
+        x += 24 + 7 * len(KIND_LABELS[key])
+    return (f'<svg class="chart" viewBox="0 0 {width} {height}" '
+            f'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Event timeline">'
+            + "".join(shapes) + axis + "".join(legend) + "</svg>")

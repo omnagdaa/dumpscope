@@ -25,13 +25,6 @@ DEFAULTS = {
     "mono_font": "",
     "font_size": 13,            # the base size every other size scales from
     "desktop_notifications": True,
-    # SMTP, for emailing a finished report. The password is deliberately absent:
-    # it is asked for at send time and never written down.
-    "smtp_host": "",
-    "smtp_port": 587,
-    "smtp_user": "",
-    "smtp_from": "",
-    "smtp_security": "starttls",
     "report_include_output": True,
     # How many volatility3 processes may run at once. 1 serialises them, which
     # protects vol3's shared cache and keeps memory use predictable.
@@ -41,7 +34,6 @@ DEFAULTS = {
 # Bounds on numeric settings; anything outside is treated as invalid.
 _RANGES = {
     "font_size": (6, 48),
-    "smtp_port": (1, 65535),
     "max_parallel_runs": (1, 8),
 }
 

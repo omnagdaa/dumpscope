@@ -1,11 +1,15 @@
 """
 Symbol table management.
 
-volatility3 needs a symbol table (ISF) matching the kernel in the image. It
-will fetch one automatically for Windows images when it can reach the internet,
-but analysts frequently work offline or against kernels the remote server does
-not cover, so DumpScope also supports downloading the bulk packs up front into
-the case's own symbols directory.
+volatility3 needs a symbol table (ISF) matching the kernel in the image. For
+Windows it can build one itself: it reads the kernel's PDB GUID from the image,
+downloads that PDB from Microsoft's symbol server and converts it. DumpScope
+points that machinery at the case — every run passes the case's symbols folder
+first and hides vol3's shared per-user cache — so the ISF for an image is
+written into, and only ever read from, the case that examined it.
+
+SymbolFetcher triggers that download deliberately, for one image. The bulk
+packs (gigabytes, every known kernel) remain available for offline work.
 """
 
 from __future__ import annotations
@@ -17,6 +21,8 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
+
+import subprocess
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -193,3 +199,111 @@ def _format_bytes(count: float) -> str:
             return f"{count:.1f} {unit}"
         count /= 1024
     return f"{count:.1f} TB"
+
+
+def list_symbols(base_dir: str) -> list[tuple[str, int]]:
+    """Every ISF file in the case's symbols folder: (relative path, size)."""
+    symbols_dir = os.path.join(base_dir, "symbols")
+    found = []
+    for root, _dirs, files in os.walk(symbols_dir):
+        for name in files:
+            if name.endswith(SYMBOL_EXTENSIONS):
+                path = os.path.join(root, name)
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = 0
+                found.append((os.path.relpath(path, symbols_dir), size))
+    return sorted(found)
+
+
+class SymbolFetcher(QThread):
+    """
+    Fetch the symbols for one Windows image into the case.
+
+    Runs ``windows.info.Info`` with the case's symbol arguments. To answer it,
+    vol3 identifies the kernel, downloads the matching PDB and writes the ISF
+    into the first symbol folder — the case's. Whatever ISF files are new
+    afterwards are what was fetched.
+    """
+
+    progress = pyqtSignal(str)
+    done = pyqtSignal(bool, str, list)        # ok, message, new relative paths
+
+    TIMEOUT = 900
+
+    def __init__(self, image_path: str, base_dir: str, parent=None):
+        super().__init__(parent)
+        self.image_path = image_path
+        self.base_dir = base_dir
+        self._proc: subprocess.Popen | None = None
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    def command(self) -> list[str]:
+        from core.vol_runner import case_symbol_args, find_vol3_command
+        return find_vol3_command() + case_symbol_args(
+            [os.path.join(self.base_dir, "symbols")],
+            os.path.join(self.base_dir, "cache"),
+        ) + ["-r", "csv", "-f", os.path.abspath(self.image_path), "windows.info.Info"]
+
+    def run(self):
+        from core.vol_runner import RUN_GATE, _creation_flags, build_environment
+        if not self.image_path or not os.path.isfile(self.image_path):
+            self.done.emit(False, "No memory image is loaded.", [])
+            return
+        symbols_dir = os.path.join(self.base_dir, "symbols")
+        os.makedirs(symbols_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.base_dir, "cache"), exist_ok=True)
+        before = {path for path, _ in list_symbols(self.base_dir)}
+
+        self.progress.emit("Waiting for other volatility3 runs to finish…")
+        if not RUN_GATE.acquire(cancelled=lambda: self._cancelled):
+            self.done.emit(False, "Cancelled.", [])
+            return
+        try:
+            self.progress.emit("Identifying the kernel and fetching its PDB from "
+                               "Microsoft's symbol server…")
+            self._proc = subprocess.Popen(
+                self.command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, env=build_environment([symbols_dir]),
+                creationflags=_creation_flags(),
+            )
+            try:
+                _out, err = self._proc.communicate(timeout=self.TIMEOUT)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.communicate()
+                self.done.emit(False, "Timed out fetching symbols.", [])
+                return
+            code = self._proc.returncode
+        except OSError as exc:
+            self.done.emit(False, f"Could not run volatility3: {exc}", [])
+            return
+        finally:
+            self._proc = None
+            RUN_GATE.release()
+
+        if self._cancelled:
+            self.done.emit(False, "Cancelled.", [])
+            return
+        added = sorted({path for path, _ in list_symbols(self.base_dir)} - before)
+        if added:
+            self.done.emit(True, f"Fetched {len(added)} symbol table(s) into the case.", added)
+        elif code == 0:
+            self.done.emit(True, "This image's symbols are already in the case.", [])
+        else:
+            tail = " ".join((err or "").strip().splitlines()[-3:])
+            self.done.emit(False,
+                           "volatility3 could not fetch symbols for this image. "
+                           "Check the network connection to msdl.microsoft.com, or "
+                           "download the full Windows pack instead."
+                           + (f"\n\n{tail}" if tail else ""), [])

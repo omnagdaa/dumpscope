@@ -28,7 +28,8 @@ from core.plugins import PluginRegistry, build_command_args
 from core.os_detect import ImageProbe, ImageProfile
 from core.vol_runner import RUN_GATE, RunSpec, VolatilityRunner
 from core.hash_worker import FileHasher, HashWorker
-from core.report import write_report
+from core.insights import missing_inputs as insight_missing_inputs
+from core.timeline import missing_inputs as timeline_missing_inputs
 from ui.bookmark_dialog import BookmarkDialog
 from ui.case_tree import CaseTree
 from ui.tag_panel import TagPanel
@@ -37,6 +38,8 @@ from ui.notifications import Notifier
 from ui.plugin_ribbon import PluginRibbon
 from ui.result_panel import ResultPanel
 from ui.result_tabs import ResultTabs
+from ui.insights_view import InsightsView
+from ui.timeline_view import TimelineView
 from ui import icons
 from ui.theme import (
     BASE_FONT_SIZE, build as build_theme, fonts as theme_fonts, palette, restyle,
@@ -137,9 +140,11 @@ class MainWindow(QMainWindow):
 
     def _ensure_case_directories(self):
         base = self.case.directory
-        if not base:
+        # Quick Analysis points at the home folder; seeding it with case
+        # folders would litter the examiner's home directory.
+        if not base or self.case.quick_mode:
             return
-        for sub in ("symbols", "yara", "exports", "dumps"):
+        for sub in ("symbols", "cache", "yara", "exports", "dumps", "reports"):
             try:
                 os.makedirs(os.path.join(base, sub), exist_ok=True)
             except OSError as exc:
@@ -165,8 +170,20 @@ class MainWindow(QMainWindow):
 
     @property
     def symbol_dirs(self) -> list[str]:
-        base = self.case.directory
-        return [os.path.join(base, "symbols")] if base else []
+        """
+        The case's symbol folder. Quick Analysis has none and uses vol3's own
+        locations; its "directory" is only the home folder, and symbols
+        written there would end up loose in the examiner's home.
+        """
+        if self.case.quick_mode or not self.case.directory:
+            return []
+        return [os.path.join(self.case.directory, "symbols")]
+
+    @property
+    def vol_cache_dir(self) -> str:
+        if self.case.quick_mode or not self.case.directory:
+            return ""
+        return os.path.join(self.case.directory, "cache")
 
     # ── Construction ──────────────────────────────────────────────────────────
 
@@ -198,6 +215,22 @@ class MainWindow(QMainWindow):
         # surface, not a throwaway result.
         self.tabs.add_result_tab(self._build_overview_tab(), "Case",
                                  closable=False, pinned=True)
+        # Timeline and Insights read the stored output and rebuild whenever a
+        # run finishes, so they are permanent tabs rather than results.
+        self.insights_view = InsightsView()
+        self.insights_view.collect_requested.connect(self._collect)
+        self.insights_view.bookmark_requested.connect(self._bookmark_insight)
+        self.insights_view.finding_activated.connect(
+            lambda finding: self._show_plugin_output(finding.plugin))
+        self.tabs.add_result_tab(self.insights_view, "Insights",
+                                 closable=False, pinned=True)
+        self.timeline_view = TimelineView()
+        self.timeline_view.collect_requested.connect(self._collect)
+        self.timeline_view.event_activated.connect(
+            lambda event: self._show_plugin_output(event.plugin))
+        self.tabs.add_result_tab(self.timeline_view, "Timeline",
+                                 closable=False, pinned=True)
+        self.tabs.setCurrentIndex(0)
         self._refresh_image_facts()
         root.addWidget(self.tabs, 1)
 
@@ -208,6 +241,7 @@ class MainWindow(QMainWindow):
             self, desktop=bool(self.settings.get("desktop_notifications", True)),
         )
         self.notifier.set_dark(self.is_dark)
+        self._refresh_analysis_views()
 
     def _build_case_dock(self):
         """
@@ -322,6 +356,7 @@ class MainWindow(QMainWindow):
         self._set_image_label(path)
         self._refresh_evidence()
         self._refresh_case_tree()
+        self._refresh_analysis_views()
         self._show_status(f"Active data source: {os.path.basename(path)}")
         self._start_os_probe()
 
@@ -418,6 +453,7 @@ class MainWindow(QMainWindow):
             return
         self.db.delete_result(result_id)
         self._refresh_case_tree()
+        self._refresh_analysis_views()
         self._show_status("Stored result deleted.")
 
     def _show_bookmark(self, bookmark: dict):
@@ -463,9 +499,6 @@ class MainWindow(QMainWindow):
         report_action.triggered.connect(self._generate_report)
         file_menu.addAction(report_action)
 
-        email_action = QAction("Email Report…", self)
-        email_action.triggered.connect(lambda: self._email_report())
-        file_menu.addAction(email_action)
 
         close_case_action = QAction("Close Case", self)
         close_case_action.setShortcut("Ctrl+W")
@@ -870,7 +903,8 @@ class MainWindow(QMainWindow):
         self._set_badge_probing()
         self._show_status("Identifying the image…")
 
-        probe = ImageProbe(image_path, self.symbol_dirs, parent=self)
+        probe = ImageProbe(image_path, self.symbol_dirs, parent=self,
+                           cache_dir=self.vol_cache_dir)
         probe.sniffed.connect(self._on_sniffed)
         probe.profiled.connect(self._on_profiled)
         probe.note.connect(self._show_status)
@@ -1038,6 +1072,7 @@ class MainWindow(QMainWindow):
             image_path=self.case.image_path,
             plugin_id=info.id,
             symbol_dirs=self.symbol_dirs,
+            cache_dir=self.vol_cache_dir,
             extra_args=extra_args,
             output_dir=self.dumps_dir,
         )
@@ -1100,6 +1135,8 @@ class MainWindow(QMainWindow):
 
         self.ribbon.set_running(plugin_id, False)
         self._refresh_case_tree()
+        if exit_code == 0 and not cancelled and not is_extraction:
+            self._refresh_analysis_views()
 
         rows = panel.model.rowCount() if panel else 0
         short = plugin_id.rsplit(".", 1)[-1]
@@ -1125,8 +1162,12 @@ class MainWindow(QMainWindow):
             self._show_status(f"{short} cancelled.")
         elif exit_code == 0:
             self._show_status(f"{short} finished — {rows:,} rows.")
-            self.notifier.notify(
-                f"{short} finished", f"{rows:,} rows{elapsed}", "success")
+            # Inside a batch (Collect, credential sweep, several clicks) each
+            # success would stack a toast over the work; the batch is announced
+            # once when it ends. Failures are always announced.
+            if self._batch_size < 2:
+                self.notifier.notify(
+                    f"{short} finished", f"{rows:,} rows{elapsed}", "success")
         else:
             self._show_status(f"{short} failed (exit {exit_code}). See the Log tab.")
             self.notifier.notify(
@@ -1552,6 +1593,7 @@ class MainWindow(QMainWindow):
             image_path=self.case.image_path,
             plugin_id=plugin_id,
             symbol_dirs=self.symbol_dirs,
+            cache_dir=self.vol_cache_dir,
             extra_args=["--pid", pid, "--dump"],
             output_dir=target,
         )
@@ -1576,128 +1618,127 @@ class MainWindow(QMainWindow):
 
     def _generate_report(self):
         """
-        Write the case report: what was examined, what was run, what was found,
-        and every file extracted out of the image.
-
-        The analysis output itself is included by default (capped per plugin,
-        with the full set left in the CSV exports), because a report that only
-        lists which plugins were run is a table of contents, not a record.
+        Write the report folder: the HTML report with insights and the incident
+        timeline, every result as CSV, the dumps, and a SHA-256 manifest.
         """
         if self.db is None:
             QMessageBox.information(
                 self, "No Case",
-                "Quick Analysis keeps no record, so there is nothing to report on.",
+                "Quick Analysis keeps no record, so there is nothing to report on. "
+                "Create a case to generate a report.",
             )
             return
+        from ui.report_dialog import ReportDialog
+        dialog = ReportDialog(self.case, self.db, self.settings, parent=self)
+        dialog.generated.connect(self._on_report_generated)
+        dialog.exec()
 
-        stamp = datetime.now().strftime("%Y%m%d-%H%M")
-        default = os.path.join(
-            self.case.reports_dir,
-            f"{self.case.case_name.replace(' ', '_')}-{stamp}.html",
-        )
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Generate Case Report", default,
-            "HTML Report (*.html);;JSON Report (*.json)",
-        )
-        if not path:
-            return
-
-        fmt = "json" if path.lower().endswith(".json") else "html"
-        results = self.db.get_results()
-        extractions = self.db.get_extractions()
-        outputs = self._report_outputs(results)
-        try:
-            write_report(
-                path, self.case,
-                self.db.get_data_sources(), results,
-                self.db.get_bookmarks(), self.db.get_audit_log(), fmt=fmt,
-                extractions=extractions, outputs=outputs,
-            )
-            self.db.log_action("report_generated", path, self.case.examiner_name)
-        except OSError as exc:
-            QMessageBox.critical(self, "Report Failed", str(exc))
-            return
-
+    def _on_report_generated(self, result):
+        if self.db is not None:
+            self.db.log_action("report_generated", result.path, self.case.examiner_name)
         self._refresh_case_tree()
         self.notifier.notify(
             "Report generated",
-            f"{len(results)} run(s), {len(extractions)} extracted file(s).",
+            f"{result.insights} insight(s), {result.events:,} timeline events, "
+            f"{result.dumps_linked + result.dumps_copied} dump(s).",
             "success",
         )
-        self._offer_report(path)
 
-    def _report_outputs(self, results: list[dict]) -> dict:
+    # ── Timeline and insights ─────────────────────────────────────────────────
+
+    def _analysis_payloads(self) -> list[dict]:
         """
-        {result id: {columns, rows}} for the runs whose output goes in the
-        report. Empty when the examiner has turned the output sections off,
-        which is what makes a hundred-megabyte case produce a readable file.
+        The output the timeline and insights are built from: the newest stored
+        run of each plugin for the active image or, in Quick Analysis, whatever
+        finished result tabs are open.
         """
-        if not self.settings.get("report_include_output", True) or self.db is None:
-            return {}
-        outputs = {}
-        for result in results:
+        if self.db is not None:
             try:
-                stored = self.db.load_result(result["id"])
+                return self.db.latest_payloads(self.active_source_id)
             except Exception as exc:
-                log.warning("Could not read result %s: %s", result.get("id"), exc)
+                log.warning("Could not read stored results: %s", exc)
+                return []
+        payloads = []
+        seen = set()
+        for panel in self._result_panels():
+            run_key = getattr(panel, "run_key", "") or panel.plugin_id
+            if "#dump" in run_key or run_key in self._runners or panel.plugin_id in seen:
                 continue
-            if stored:
-                outputs[result["id"]] = stored
-        return outputs
+            seen.add(panel.plugin_id)
+            payloads.append(panel.result_payload())
+        return payloads
 
-    def _offer_report(self, path: str):
-        """Written — now open it, send it, or neither."""
-        box = QMessageBox(self)
-        box.setWindowTitle("Report Generated")
-        box.setText(f"Written to:\n{path}")
-        open_btn = box.addButton("Open", QMessageBox.ButtonRole.AcceptRole)
-        email_btn = box.addButton("Email…", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
+    def _refresh_analysis_views(self):
+        if getattr(self, "timeline_view", None) is None:
+            return
+        payloads = self._analysis_payloads()
+        have = {p.get("plugin", "") for p in payloads}
+        runnable = (lambda p: self.registry.get(p) is not None
+                    or not self.registry.available)
+        timeline_missing = [p for p in timeline_missing_inputs(have) if runnable(p)]
+        insight_missing = [p for p in insight_missing_inputs(have) if runnable(p)]
+        try:
+            self.timeline_view.set_payloads(payloads, timeline_missing)
+            self.insights_view.set_payloads(payloads, insight_missing)
+        except Exception as exc:              # analysis must never take the window down
+            log.exception("Could not rebuild the timeline/insights: %s", exc)
+            return
+        high = sum(1 for f in self.insights_view.findings if f.severity == "high")
+        index = self.tabs.indexOf(self.insights_view)
+        if index >= 0:
+            self.tabs.setTabText(index, f"Insights ({high})" if high else "Insights")
 
-        clicked = box.clickedButton()
-        if clicked is open_btn:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-        elif clicked is email_btn:
-            self._email_report(path)
+    def _collect(self, plugins: list[str]):
+        """Run each listed plugin that is not running already; they queue on the gate."""
+        image_path = self.case.image_path
+        if not image_path or not os.path.exists(image_path):
+            QMessageBox.warning(self, "No Image Loaded",
+                                "Load a memory image first (File → Open Image).")
+            return
+        current = self.tabs.currentWidget()
+        started = []
+        for plugin_id in plugins:
+            info = self.registry.get(plugin_id)
+            if info is None or plugin_id in self._runners or info.needs_input:
+                continue
+            self._launch(info, self._default_args_for(info))
+            started.append(info.short_name)
+        if current is not None:
+            self.tabs.setCurrentWidget(current)
+        if started:
+            self._show_status(
+                f"Collecting: {', '.join(started)} — they run one at a time; this "
+                "view updates as each finishes.")
+        else:
+            self._show_status("Nothing to collect — those plugins have already run.")
 
-    def _email_report(self, path: str = ""):
-        """
-        Send a report to whoever the case says it is for.
-
-        Extracted files are offered as optional attachments and start
-        unchecked: a process dump is potentially live malware, and attaching
-        one to an email should always be a decision.
-        """
-        from ui.email_dialog import EmailReportDialog
-
-        if not path:
-            path = self._latest_report()
-            if not path:
-                QMessageBox.information(
-                    self, "No Report",
-                    "Generate a report first (File → Generate Case Report).",
-                )
+    def _show_plugin_output(self, plugin: str):
+        """Bring up the output an event or finding came from."""
+        if not plugin:
+            return
+        panel = self._panel_for(plugin)
+        if panel is not None:
+            self.tabs.setCurrentWidget(panel)
+            return
+        if self.db is not None:
+            for result in self.db.get_results(plugin=plugin, source_id=self.active_source_id):
+                self._open_stored_result(result["id"])
                 return
 
-        extras = []
-        if self.db is not None:
-            extras = [
-                item["path"] for item in self.db.get_extractions()
-                if not item.get("missing")
-            ]
-
-        dialog = EmailReportDialog(self.case, path, extras=extras, parent=self)
-        dialog.sent.connect(lambda: self._on_report_sent(path, dialog))
-        dialog.exec()
-
-    def _on_report_sent(self, path: str, dialog):
-        recipients = ", ".join(dialog.message().recipients())
-        if self.db is not None:
-            self.db.log_action("report_emailed", f"{path} -> {recipients}",
-                               self.case.examiner_name)
+    def _bookmark_insight(self, finding):
+        if self.db is None:
+            self._show_status("Quick Analysis cannot keep bookmarks.")
+            return
+        tag = "Suspicious" if finding.severity in ("high", "medium") else "Notable"
+        self.db.save_bookmark(
+            finding.title, finding.detail, finding.plugin, tag=tag,
+            notes=f"Insight ({finding.severity}): {finding.category}",
+            source_id=self.active_source_id,
+            row={"PID": finding.pid, "Process": finding.process,
+                 **{k: v for k, v in finding.evidence}},
+        )
         self._refresh_case_tree()
-        self.notifier.notify("Report sent", recipients, "success")
+        self._show_status(f"Bookmarked: {finding.title}")
 
     def _latest_report(self) -> str:
         """The most recently written report in the case, if there is one."""
@@ -1727,7 +1768,8 @@ class MainWindow(QMainWindow):
     def _open_symbol_manager(self):
         from ui.symbol_dialog import SymbolDialog
         base = self.case.directory or os.path.expanduser("~")
-        SymbolDialog(base, parent=self).exec()
+        SymbolDialog(base, parent=self, image_path=self.case.image_path,
+                     case_mode=not self.case.quick_mode).exec()
 
     def _refresh_registry(self):
         self.registry = PluginRegistry.load(refresh=True)
@@ -1787,6 +1829,9 @@ class MainWindow(QMainWindow):
             self.notifier.set_dark(self.is_dark)
         self.ribbon.repaint_glyphs()
         self.tabs.apply_theme(self.is_dark)
+        if getattr(self, "timeline_view", None) is not None:
+            self.timeline_view.set_dark(self.is_dark)
+            self.insights_view.set_dark(self.is_dark)
         if getattr(self, "case_tree", None) is not None:
             self.case_tree.apply_theme(self.is_dark)
             self._refresh_case_tree()
@@ -1934,12 +1979,21 @@ class MainWindow(QMainWindow):
         commands: list[Command] = [
             Command("Open Image…", self._open_image_dialog, group="File",
                     shortcut="Ctrl+O", glyph="disk", keywords="load memory dump"),
+            Command("Show Insights", lambda: self.tabs.setCurrentWidget(self.insights_view),
+                    group="Analysis", glyph="shield",
+                    keywords="triage findings suspicious anomalies hidden injected"),
+            Command("Show Timeline", lambda: self.tabs.setCurrentWidget(self.timeline_view),
+                    group="Analysis", glyph="clock",
+                    keywords="incident timeline events chronology histogram"),
+            Command("Collect Timeline and Insight Data",
+                    lambda: self._collect(list(dict.fromkeys(
+                        self.timeline_view.missing + self.insights_view.missing))),
+                    group="Analysis", glyph="activity",
+                    keywords="run pslist dlllist netscan malfind cmdline svcscan"),
             Command("Export Current Results…", self._export_current, group="File",
                     shortcut="Ctrl+E", glyph="download", keywords="csv json save"),
             Command("Generate Case Report…", self._generate_report, group="File",
                     shortcut="Ctrl+R", glyph="news"),
-            Command("Email Report…", lambda: self._email_report(), group="File",
-                    glyph="link", keywords="send smtp mail recipient examiner"),
             Command("Open Case Folder", self._reveal_case_folder, group="File",
                     glyph="box"),
             Command("Include Analysis Output in Reports",

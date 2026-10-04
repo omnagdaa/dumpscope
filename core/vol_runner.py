@@ -161,8 +161,20 @@ _COMMAND_CACHE: list[str] | None = None
 # so does this.
 # argv[0] is rewritten because volatility3's parser reads it: left as "-c" it
 # is taken for the --config flag and the run dies on argument parsing.
+#
+# With DUMPSCOPE_CASE_SYMBOLS set, vol3's per-user symbol cache
+# (~/.cache/volatility3/symbols) is dropped from its search path before the CLI
+# runs. The case's own symbols folder, passed with -s, is then the first
+# writable location, so a PDB that vol3 downloads and converts for this image
+# lands inside the case rather than in a cache shared by every investigation.
+# symbols.__path__ is the same list object, so editing it in place covers both.
 _CLI_ENTRY = (
-    "import sys; sys.argv[0] = 'vol'; "
+    "import os, sys; sys.argv[0] = 'vol'\n"
+    "if os.environ.get('DUMPSCOPE_CASE_SYMBOLS'):\n"
+    "    from volatility3.framework import constants as c\n"
+    "    user = os.path.realpath(os.path.join(c.CACHE_PATH, 'symbols'))\n"
+    "    c.SYMBOL_BASEPATHS[:] = [p for p in c.SYMBOL_BASEPATHS"
+    " if os.path.realpath(p) != user]\n"
     "from volatility3.cli import main; sys.exit(main())"
 )
 
@@ -252,8 +264,10 @@ def find_vol3_command() -> list[str]:
     return list(command)
 
 
-def vol3_cache_path() -> str:
-    """Where vol3 keeps its identifier cache and decompressed symbols."""
+def vol3_cache_path(cache_dir: str = "") -> str:
+    """Where vol3 keeps its identifier cache: the case's, or vol3's default."""
+    if cache_dir:
+        return os.path.abspath(cache_dir)
     try:
         from volatility3.framework import constants
         return constants.CACHE_PATH
@@ -262,15 +276,37 @@ def vol3_cache_path() -> str:
         return os.path.join(os.path.dirname(cache_dir()), "volatility3")
 
 
+def case_symbol_args(symbol_dirs: list[str] | None, cache_dir: str = "") -> list[str]:
+    """
+    vol3 global options that keep symbols and the identifier cache in the case.
+
+    ``-s`` takes a semicolon-separated list on every platform (vol3 splits on
+    ";" itself). Its first writable entry is where vol3 writes the ISF it
+    builds from a downloaded PDB. ``--cache-path`` moves the identifier cache,
+    so clearing a corrupted cache only ever touches this case.
+    """
+    args: list[str] = []
+    dirs = [os.path.abspath(d) for d in (symbol_dirs or []) if d]
+    if dirs:
+        args += ["-s", ";".join(dirs)]
+    if cache_dir:
+        args += ["--cache-path", os.path.abspath(cache_dir)]
+    return args
+
+
 def build_environment(symbol_dirs: list[str] | None = None) -> dict[str, str]:
-    """Process environment for a vol3 run, with case symbol dirs taking priority."""
+    """
+    Process environment for a vol3 run.
+
+    vol3 reads no environment variable for symbol locations; they are passed on
+    the command line (see case_symbol_args). What the environment carries is
+    the switch that hides the per-user symbol cache whenever the run has case
+    symbol folders, so the case stays self-contained.
+    """
     env = os.environ.copy()
-    existing = [p for p in env.get("VOLATILITY_SYMBOL_DIRS", "").split(os.pathsep) if p]
-    for directory in reversed(symbol_dirs or []):
-        if directory and directory not in existing:
-            existing.insert(0, directory)
-    if existing:
-        env["VOLATILITY_SYMBOL_DIRS"] = os.pathsep.join(existing)
+    env.pop("DUMPSCOPE_CASE_SYMBOLS", None)
+    if any(symbol_dirs or []):
+        env["DUMPSCOPE_CASE_SYMBOLS"] = "1"
     # vol3 block-buffers stdout when it is a pipe; without this, rows arrive in
     # 8 KB clumps and the table looks frozen on slow plugins.
     env["PYTHONUNBUFFERED"] = "1"
@@ -307,9 +343,12 @@ class RunSpec:
     # Ask vol3 to discard its identifier/symbol cache before running. Set only
     # on the automatic retry after a corrupted-cache failure.
     clear_cache: bool = False
+    # The case's private vol3 cache (identifier cache). Empty: vol3's default.
+    cache_dir: str = ""
 
     def command(self) -> list[str]:
         command = find_vol3_command() + ["-r", "csv"]
+        command += case_symbol_args(self.symbol_dirs, self.cache_dir)
         if self.clear_cache:
             command.append("--clear-cache")
         if self.output_dir:
@@ -425,6 +464,11 @@ class VolatilityRunner(QThread):
 
         command = self.spec.command()
         self.log_line.emit("$ " + _printable(command))
+        # vol3 writes its identifier cache into --cache-path but never creates
+        # the folder; a missing one fails the run on its first cache write.
+        for folder in [self.spec.cache_dir, *self.spec.symbol_dirs]:
+            if folder:
+                os.makedirs(folder, exist_ok=True)
 
         self._proc = subprocess.Popen(
             command,
@@ -565,7 +609,8 @@ class VolatilityRunner(QThread):
             hint = (
                 "\n\nvolatility3's cache appears to be corrupted"
                 + (" and clearing it did not help" if self.retried_after_cache_clear else "")
-                + ". Delete the folder below and try again:\n" + vol3_cache_path()
+                + ". Delete the folder below and try again:\n"
+                + vol3_cache_path(self.spec.cache_dir)
             )
         elif "symbol" in lowered and ("not found" in lowered or "unsatisfied" in lowered):
             hint = (

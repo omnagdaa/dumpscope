@@ -210,6 +210,19 @@ QCheckBox::indicator {
     background-color: $surface;
 }
 QCheckBox::indicator:checked { background-color: $accent; border-color: $accent; }
+QRadioButton { color: $text_dim; spacing: 6px; background: transparent; }
+QRadioButton:checked { color: $text; }
+QRadioButton::indicator {
+    width: 14px; height: 14px;
+    border: 1px solid $border_strong;
+    border-radius: 7px;
+    background-color: $surface;
+}
+QRadioButton::indicator:checked {
+    background-color: $accent;
+    border: 3px solid $surface_high;
+    width: 10px; height: 10px;
+}
 
 /* ── Group boxes ───────────────────────────────────────────────────────── */
 QGroupBox {
@@ -607,6 +620,28 @@ QListWidget#recentList::item {
     color: $text;
 }
 QListWidget#recentList::item:selected { background-color: $select; color: $on_select; }
+
+/* ── Timeline and insights ─────────────────────────────────────────────── */
+QPushButton#timelineChip {
+    padding: 4px 10px;
+    font-size: 11px;
+    border-radius: 6px;
+    background-color: $surface_alt;
+    color: $text_faint;
+}
+QPushButton#timelineChip:checked { background-color: $surface_high; color: $text; }
+QFrame#insightCard {
+    background-color: $surface;
+    border: 1px solid $border;
+    border-radius: 8px;
+    min-width: 96px;
+}
+QLabel#insightCount { font-size: 22px; font-weight: 800; color: $text; background: transparent; }
+QLabel#insightLabel {
+    font-size: 10px; font-weight: 700; letter-spacing: 1px;
+    color: $text_faint; background: transparent;
+}
+QLabel#reportOption { font-size: 12px; color: $text_dim; }
 
 /* ── Dialogs and wizard ────────────────────────────────────────────────── */
 QLabel#dialogHeading { font-size: 16px; font-weight: 700; color: $text; }
