@@ -15,7 +15,6 @@ import pytest
 from core import settings
 from core.case import Case, CaseError, forget_case, load_recent, remember_case, safe_dirname
 from core.database import Database, db_filename
-from core.mailer import Account, MailError, Message, split_addresses, valid_address
 from core.os_detect import ImageProfile, parse_info_rows, sniff_header
 from core.plugins import PluginArg, PluginInfo, PluginRegistry, build_command_args, plugin_os
 from core.report import build_html, build_json
@@ -163,8 +162,7 @@ def _write_settings(payload):
     ({"font_size": "16"}, "font_size", 16),          # numeric strings are fine
     ({"font_size": True}, "font_size", 13),          # bool is not an int here
     ({"desktop_notifications": "no"}, "desktop_notifications", True),
-    ({"smtp_port": 70000}, "smtp_port", 587),
-    ({"smtp_host": 123}, "smtp_host", ""),
+    ({"mono_font": 123}, "mono_font", ""),
     ({"max_parallel_runs": 0}, "max_parallel_runs", 1),
     ({"max_parallel_runs": 100}, "max_parallel_runs", 1),
     ({"max_parallel_runs": 3}, "max_parallel_runs", 3),
@@ -284,56 +282,6 @@ def test_same_source_twice_is_one_row(db, tmp_path):
     assert len(db.get_data_sources()) == 1
 
 
-# ── Mail ──────────────────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("address, ok", [
-    ("analyst@example.com", True),
-    ("Analyst <analyst@example.com>", True),
-    ("a@b.co", True),
-    ("", False),
-    ("no-at-sign", False),
-    ("a@@b.com", False),
-    ("@example.com", False),
-    ("a@example", False),
-    ("a@example.", False),
-    ("a@.example.com", False),         # empty first label
-    ("a@example..com", False),         # empty middle label
-    ("a b@example.com", False),
-    ("a@exa\tmple.com", False),       # parseaddr strips the tab silently
-    ("a@example.com\r\nBcc: x@evil.com", False),   # header injection
-    (None, False),
-])
-def test_valid_address(address, ok):
-    assert valid_address(address) is ok
-
-
-def test_split_addresses_tolerates_mess():
-    assert split_addresses(" a@x.com ; ,, b@y.org,") == ["a@x.com", "b@y.org"]
-    assert split_addresses("") == []
-    assert split_addresses(None) == []
-
-
-@pytest.mark.parametrize("account", [
-    Account(host="", sender="a@x.com"),
-    Account(host="smtp.x.com", sender="bad"),
-    Account(host="smtp.x.com", sender="a@x.com", security="rot13"),
-])
-def test_bad_accounts_are_refused(account):
-    with pytest.raises(MailError):
-        account.validate()
-
-
-@pytest.mark.parametrize("message", [
-    Message(to=[], subject="s"),
-    Message(to=["   "], subject="s"),
-    Message(to=["a@x.com"], subject="   "),
-    Message(to=["a@x.com"], cc=["broken"], subject="s"),
-])
-def test_bad_messages_are_refused(message):
-    with pytest.raises(MailError):
-        message.validate()
-
-
 # ── Plugins ───────────────────────────────────────────────────────────────────
 
 def _info(*args):
@@ -421,10 +369,12 @@ def test_detect_os_from_banner():
     assert detect_os_from_banner("nothing to see") is None
 
 
-def test_build_environment_puts_case_symbols_first(monkeypatch):
-    monkeypatch.setenv("VOLATILITY_SYMBOL_DIRS", os.pathsep.join(["/existing", ""]))
-    env = build_environment(["/case/symbols", "", "/existing"])
-    assert env["VOLATILITY_SYMBOL_DIRS"].split(os.pathsep) == ["/case/symbols", "/existing"]
+def test_build_environment_isolates_only_when_the_case_has_symbols(monkeypatch):
+    monkeypatch.setenv("DUMPSCOPE_CASE_SYMBOLS", "1")      # inherited: must not leak
+    assert "DUMPSCOPE_CASE_SYMBOLS" not in build_environment([])
+    assert "DUMPSCOPE_CASE_SYMBOLS" not in build_environment(["", ""])
+    env = build_environment(["/case/symbols"])
+    assert env["DUMPSCOPE_CASE_SYMBOLS"] == "1"
     assert env["PYTHONUNBUFFERED"] == "1"
 
 

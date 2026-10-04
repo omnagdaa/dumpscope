@@ -44,3 +44,32 @@ def _isolated_config(monkeypatch, tmp_path_factory):
     yield
     settings._cache = None
     RUN_GATE.set_limit(1)
+    _destroy_widgets()
+
+
+def _destroy_widgets():
+    """
+    Delete every top-level widget a test left behind.
+
+    Closed windows otherwise live until the session ends, and each later
+    QApplication.setStyleSheet re-polishes all of them: by the end of the
+    suite a one-line theme change cost seconds.
+    """
+    from PyQt6.QtCore import QCoreApplication, QEvent, QThread
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in app.topLevelWidgets():
+        # Background workers parented to a window must finish before it goes.
+        for thread in widget.findChildren(QThread):
+            if thread.isRunning():
+                cancel = getattr(thread, "cancel", None)
+                if cancel:
+                    cancel()
+                thread.wait(5000)
+        widget.close()
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()

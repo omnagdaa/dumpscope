@@ -23,12 +23,51 @@ for index, arg in enumerate(sys.argv):
     if arg == "--stub-mode":
         mode = sys.argv[index + 1]
 
+
 def _arg(name, default=""):
     for index, arg in enumerate(sys.argv):
         if arg == name and index + 1 < len(sys.argv):
             return sys.argv[index + 1]
     return default
 
+
+# STUB_VOL_FIXTURES=1: answer as vol3 would for the plugin named on the command
+# line, from tests/vol_fixtures.py — the end-to-end tests run real windows
+# against this. STUB_VOL_ARGV_LOG records each command line for inspection.
+if os.environ.get("STUB_VOL_FIXTURES"):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from vol_fixtures import FIXTURES
+    log = os.environ.get("STUB_VOL_ARGV_LOG")
+    if log:
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write("\t".join(sys.argv[1:]) + "\n")
+    if "windows.info.Info" in sys.argv:
+        # A real run downloads the kernel PDB and writes its ISF into the first
+        # -s folder; STUB_FETCH_ISF=1 imitates that.
+        symbol_dirs = _arg("-s").split(";") if _arg("-s") else []
+        if os.environ.get("STUB_FETCH_ISF") and symbol_dirs:
+            target = os.path.join(symbol_dirs[0], "windows", "ntkrnlmp.pdb")
+            os.makedirs(target, exist_ok=True)
+            with open(os.path.join(target, "3844DBB920174967BE7AA4A2C20430FA-2.json.xz"),
+                      "wb") as handle:
+                handle.write(b"\xfd7zXZ\x00stub")
+        elif os.environ.get("STUB_INFO_FAIL"):
+            sys.stderr.write("Unable to validate the plugin requirements: "
+                             "symbol table not found\n")
+            sys.exit(1)
+        print("Variable,Value")
+        print("NTBuildLab,19041.1.amd64fre.vb_release.191206-1406")
+        print("Is64Bit,True")
+        sys.exit(0)
+    plugin = next((a for a in sys.argv if a in FIXTURES), None)
+    if plugin is None:
+        sys.stderr.write("Unsatisfied requirement: stub has no fixture for this plugin\n")
+        sys.exit(1)
+    columns, rows = FIXTURES[plugin]
+    writer = csv.writer(sys.stdout, lineterminator="\n", escapechar="\\")
+    writer.writerow(columns)
+    writer.writerows(rows)
+    sys.exit(0)
 
 if mode == "slow":
     trace = _arg("--stub-trace")
