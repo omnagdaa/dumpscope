@@ -8,6 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+.vscode
+.vexp
 
 # Generated analysis output
 graphify-out/
