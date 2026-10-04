@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 log = logging.getLogger("dumpscope.database")
@@ -149,27 +150,49 @@ _CASE_FIELDS = (
 )
 
 
+def db_filename(case_name: str) -> str:
+    """
+    The database file name for a case. Case.db_path uses this too, so the two
+    can never disagree about where a case's database is.
+    """
+    safe_name = "".join(
+        ch if ch.isalnum() or ch in "-_" else "_" for ch in (case_name or "")
+    ).strip("_") or "case"
+    return f"{safe_name}.db"
+
+
 class Database:
     """Storage for one case. Not thread-safe; use it from the GUI thread."""
 
     def __init__(self, base_dir: str, case_name: str):
         os.makedirs(base_dir, exist_ok=True)
-        safe_name = "".join(
-            ch if ch.isalnum() or ch in "-_" else "_" for ch in case_name
-        ).strip("_") or "case"
-        self.db_path = os.path.join(base_dir, f"{safe_name}.db")
+        self.db_path = os.path.join(base_dir, db_filename(case_name))
         self.case_id: int | None = None
         self._init_db()
 
     # ── Connection ────────────────────────────────────────────────────────────
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
+        """
+        A connection that commits on success, rolls back on error, and is
+        always closed. sqlite3's own context manager only commits; the handle
+        stays open until garbage collection, which on Windows keeps the case
+        folder locked against being moved or deleted.
+        """
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        # WAL keeps a long-running read from blocking a result write.
-        conn.execute("PRAGMA journal_mode = WAL")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            # WAL keeps a long-running read from blocking a result write.
+            conn.execute("PRAGMA journal_mode = WAL")
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_db(self):
         with self._connect() as conn:

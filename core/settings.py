@@ -33,9 +33,42 @@ DEFAULTS = {
     "smtp_from": "",
     "smtp_security": "starttls",
     "report_include_output": True,
+    # How many volatility3 processes may run at once. 1 serialises them, which
+    # protects vol3's shared cache and keeps memory use predictable.
+    "max_parallel_runs": 1,
 }
 
+# Bounds on numeric settings; anything outside is treated as invalid.
+_RANGES = {
+    "font_size": (6, 48),
+    "smtp_port": (1, 65535),
+    "max_parallel_runs": (1, 8),
+}
+
+_INVALID = object()
+
 _cache: dict | None = None
+
+
+def _coerce(key: str, value):
+    """`value` as the type its default has, or _INVALID when it cannot be."""
+    default = DEFAULTS[key]
+    if isinstance(default, bool):
+        return value if isinstance(value, bool) else _INVALID
+    if isinstance(default, int):
+        if isinstance(value, bool):
+            return _INVALID
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return _INVALID
+        low, high = _RANGES.get(key, (None, None))
+        if low is not None and not low <= number <= high:
+            return _INVALID
+        return number
+    if isinstance(default, str):
+        return value if isinstance(value, str) else _INVALID
+    return value
 
 
 def settings_file() -> str:
@@ -53,7 +86,15 @@ def load(refresh: bool = False) -> dict:
         if isinstance(stored, dict):
             # Unknown keys are dropped rather than kept: they are either from a
             # newer version or corruption, and neither should reach the UI.
-            values.update({k: v for k, v in stored.items() if k in DEFAULTS})
+            # So are values of the wrong type — `int("big")` on a hand-edited
+            # font size would otherwise crash the window at startup.
+            for key, value in stored.items():
+                if key in DEFAULTS:
+                    coerced = _coerce(key, value)
+                    if coerced is not _INVALID:
+                        values[key] = coerced
+                    else:
+                        log.warning("Ignoring invalid %s=%r in settings", key, value)
     except FileNotFoundError:
         pass
     except (OSError, ValueError) as exc:
@@ -69,7 +110,11 @@ def get(key: str, default=None):
 def save(**changes) -> dict:
     """Update and persist. Returns the full settings."""
     values = dict(load())
-    values.update({k: v for k, v in changes.items() if k in DEFAULTS})
+    for key, value in changes.items():
+        if key in DEFAULTS:
+            coerced = _coerce(key, value)
+            if coerced is not _INVALID:
+                values[key] = coerced
     global _cache
     _cache = values
     try:

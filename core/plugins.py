@@ -489,7 +489,11 @@ def build_command_args(info: PluginInfo, values: dict[str, object]) -> list[str]
     by_name = {a.name: a for a in info.args}
     for name, value in values.items():
         arg = by_name.get(name)
-        if arg is None or value is None or value == "":
+        if arg is None or value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, (list, tuple)) and not value:
             continue
         if arg.kind == "Boolean":
             if value:

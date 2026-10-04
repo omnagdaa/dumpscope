@@ -172,8 +172,9 @@ class SymbolDownloader(QThread):
                 if self._cancelled:
                     break
                 # Reject absolute paths and traversal before writing anything.
-                destination = os.path.normpath(os.path.join(target_dir, member.filename))
-                if not destination.startswith(os.path.abspath(target_dir) + os.sep):
+                root = os.path.abspath(target_dir)
+                destination = os.path.normpath(os.path.join(root, member.filename))
+                if not destination.startswith(root + os.sep):
                     log.warning("Skipping unsafe archive entry %s", member.filename)
                     continue
                 os.makedirs(os.path.dirname(destination), exist_ok=True)

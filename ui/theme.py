@@ -588,6 +588,13 @@ QLabel#launcherHeading {
     letter-spacing: 1.2px;
     color: $text_faint;
 }
+QFrame#launcherDivider { background-color: $border; border: none; }
+QFrame#launcherEmpty {
+    border: 1px dashed $border;
+    border-radius: 10px;
+}
+QLabel#launcherEmptyTitle { font-size: 16px; font-weight: 700; color: $text; }
+QLabel#launcherEmptyText { font-size: 12px; color: $text_dim; }
 QListWidget#recentList {
     background-color: transparent;
     border: 1px solid $border;

@@ -89,12 +89,17 @@ class Message:
 
 def valid_address(address: str) -> bool:
     """A deliberately loose check: catches typos, not exotic-but-legal addresses."""
+    # parseaddr quietly drops control characters, so "a@exa\tmple.com" would
+    # validate as a@example.com — a different domain from the one typed.
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in (address or "")):
+        return False
     _name, email = parseaddr(address or "")
     if not email or email.count("@") != 1:
         return False
     local, _, domain = email.partition("@")
-    return bool(local) and "." in domain and not domain.endswith(".") \
-        and " " not in email
+    labels = domain.split(".")
+    return bool(local) and len(labels) >= 2 and all(labels) \
+        and not any(ch.isspace() for ch in email)
 
 
 def split_addresses(text: str) -> list[str]:

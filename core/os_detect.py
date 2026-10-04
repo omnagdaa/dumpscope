@@ -35,7 +35,8 @@ from dataclasses import dataclass, field
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.vol_runner import (
-    _creation_flags, build_environment, detect_os_from_banner, find_vol3_command,
+    RUN_GATE, _creation_flags, build_environment, detect_os_from_banner,
+    find_vol3_command,
 )
 
 log = logging.getLogger("dumpscope.os_detect")
@@ -75,7 +76,8 @@ class ImageProfile:
     def summary(self) -> str:
         if not self.os:
             return "Unidentified image"
-        name = {"windows": "Windows", "linux": "Linux", "mac": "macOS"}[self.os]
+        name = {"windows": "Windows", "linux": "Linux", "mac": "macOS"}.get(
+            self.os, self.os.title())
         qualifier = {
             "certain": "", "likely": " (likely)", "assumed": " (assumed)",
         }.get(self.confidence, "")
@@ -311,19 +313,29 @@ class ImageProbe(QThread):
         return None
 
     def _guarded(self, command: list[str], timeout: int):
-        """Run a command, keeping a handle on it so `cancel` can stop it."""
-        proc = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            env=build_environment(self.symbol_dirs), creationflags=_creation_flags(),
-        )
-        self._proc = proc
+        """
+        Run a command, keeping a handle on it so `cancel` can stop it.
+
+        Queues on the shared RunGate like any plugin run: the probe is a vol3
+        process too, and it touches the same caches.
+        """
+        if not RUN_GATE.acquire(cancelled=lambda: self._cancelled):
+            raise RuntimeError("cancelled while queued")
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            raise
+            proc = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env=build_environment(self.symbol_dirs), creationflags=_creation_flags(),
+            )
+            self._proc = proc
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise
+            finally:
+                self._proc = None
+            return proc.returncode, stdout or "", stderr or ""
         finally:
-            self._proc = None
-        return proc.returncode, stdout or "", stderr or ""
+            RUN_GATE.release()

@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
-from PyQt6.QtGui import QAction, QColor, QDesktopServices, QFont
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QApplication, QColorDialog, QDockWidget, QFileDialog, QFontDialog,
     QFrame, QGridLayout,
@@ -26,7 +26,7 @@ from core.case import Case, remember_case
 from core.database import Database
 from core.plugins import PluginRegistry, build_command_args
 from core.os_detect import ImageProbe, ImageProfile
-from core.vol_runner import RunSpec, VolatilityRunner
+from core.vol_runner import RUN_GATE, RunSpec, VolatilityRunner
 from core.hash_worker import FileHasher, HashWorker
 from core.report import write_report
 from ui.bookmark_dialog import BookmarkDialog
@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
         set_fonts(self.settings.get("ui_font", ""),
                   self.settings.get("mono_font", ""),
                   int(self.settings.get("font_size") or BASE_FONT_SIZE))
+        RUN_GATE.set_limit(self.settings.get("max_parallel_runs", 1))
 
         self.db = self._open_case_database()
         self._ensure_case_directories()
@@ -539,6 +540,22 @@ class MainWindow(QMainWindow):
         refresh_action = QAction("Refresh Plugin List", self)
         refresh_action.triggered.connect(self._refresh_registry)
         tools_menu.addAction(refresh_action)
+        tools_menu.addSeparator()
+
+        # One at a time is the safe default (shared vol3 cache, memory per
+        # process); an examiner on a large machine can raise it.
+        parallel_menu = tools_menu.addMenu("Parallel volatility3 Runs")
+        self.parallel_group = QActionGroup(self)
+        self.parallel_group.setExclusive(True)
+        current = RUN_GATE.limit
+        for count in (1, 2, 3, 4):
+            label = "1 (one at a time, safest)" if count == 1 else str(count)
+            action = QAction(label, self, checkable=True)
+            action.setData(count)
+            action.setChecked(count == current)
+            action.triggered.connect(lambda _, n=count: self._set_parallel_runs(n))
+            self.parallel_group.addAction(action)
+            parallel_menu.addAction(action)
 
         help_menu = bar.addMenu("&Help")
         about_action = QAction("About DumpScope", self)
@@ -1043,6 +1060,7 @@ class MainWindow(QMainWindow):
         runner.rows_ready.connect(panel.append_rows)
         runner.progress.connect(panel.set_progress)
         runner.log_line.connect(panel.append_log)
+        runner.queued.connect(panel.set_queued)
         runner.failed.connect(panel.set_error)
         runner.run_finished.connect(
             lambda code, key=run_key: self._on_run_finished(code, key)
@@ -1875,6 +1893,14 @@ class MainWindow(QMainWindow):
         self._show_status(
             "Reports will include the analysis output." if enabled else
             "Reports will list the runs only, without their rows."
+        )
+
+    def _set_parallel_runs(self, count: int):
+        self.settings = settings.save(max_parallel_runs=int(count))
+        RUN_GATE.set_limit(count)
+        self._show_status(
+            "volatility3 runs will queue and run one at a time." if count == 1 else
+            f"Up to {count} volatility3 runs may now run at once."
         )
 
     def _set_desktop_notifications(self, enabled: bool):

@@ -83,7 +83,8 @@ class Case:
 
     @property
     def db_path(self) -> str:
-        return os.path.join(self.directory, f"{safe_dirname(self.case_name)}.db")
+        from core.database import db_filename
+        return os.path.join(self.directory, db_filename(self.case_name))
 
     def subdir(self, name: str) -> str:
         path = os.path.join(self.directory, name)
@@ -148,15 +149,25 @@ class Case:
         try:
             with open(path, encoding="utf-8") as handle:
                 data = json.load(handle)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CaseError(f"The case file could not be read:\n{exc}") from exc
+        if not isinstance(data, dict):
+            raise CaseError(f"The case file is not a case record:\n{path}")
 
         known = {f for f in cls.__dataclass_fields__}
         payload = {k: v for k, v in data.items() if k in known}
         # The folder is the source of truth for location: a case that has been
         # moved must still open, so the stored path is deliberately ignored.
         payload["directory"] = directory
-        payload.setdefault("case_name", os.path.basename(directory))
+        if not isinstance(payload.get("case_name"), str) or not payload["case_name"].strip():
+            payload["case_name"] = os.path.basename(directory)
+        # Hand-edited or damaged fields must not reach the UI as the wrong
+        # type: every text field is coerced, every flag is made a bool.
+        for name, spec in cls.__dataclass_fields__.items():
+            if name in payload and spec.type in ("str", str):
+                payload[name] = "" if payload[name] is None else str(payload[name])
+            elif name in payload and spec.type in ("bool", bool):
+                payload[name] = bool(payload[name])
 
         case = cls(**payload)
         case.last_opened = _now()

@@ -257,6 +257,15 @@ class ResultPanel(QWidget):
         self.progress.setValue(int(max(0.0, min(100.0, percent))))
         self.stage_lbl.setText(description)
 
+    def set_queued(self, ahead: int):
+        """Waiting on the RunGate: say so, rather than showing a frozen 0%."""
+        if not self._running:
+            return
+        self.progress.setVisible(False)
+        self.stage_lbl.setText(
+            f"Queued — waiting for {ahead} other run{'s' if ahead != 1 else ''} to finish"
+        )
+
     def _update_row_count(self):
         total = self.model.rowCount()
         shown = self.proxy.rowCount()

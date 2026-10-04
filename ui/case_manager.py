@@ -18,7 +18,8 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
     QLabel, QListWidget,
-    QListWidgetItem, QMenu, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QListWidgetItem, QMenu, QMessageBox, QPushButton, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 
 from ui.theme import build as build_theme
@@ -144,19 +145,19 @@ class CaseManager(QDialog):
         self.recent_list.itemDoubleClicked.connect(self._open_selected)
         self.recent_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.recent_list.customContextMenuRequested.connect(self._recent_menu)
-        layout.addWidget(self.recent_list, 1)
 
-        self.empty_lbl = QLabel(
-            "No cases yet. Create one to start keeping results, bookmarks "
-            "and an audit trail."
-        )
-        self.empty_lbl.setWordWrap(True)
-        self.empty_lbl.setObjectName("launcherHint")
-        layout.addWidget(self.empty_lbl)
+        # The list and its empty state share one slot, so the heading stays
+        # pinned to the top whichever is showing. Hiding the list outright
+        # let the layout float the heading to the middle of the pane.
+        self.recent_stack = QStackedWidget()
+        self.recent_stack.addWidget(self.recent_list)
+        self.recent_stack.addWidget(self._build_empty_state())
+        layout.addWidget(self.recent_stack, 1)
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
         divider.setFixedHeight(1)
+        divider.setObjectName("launcherDivider")
         layout.addWidget(divider)
 
         buttons = QHBoxLayout()
@@ -173,6 +174,43 @@ class CaseManager(QDialog):
             lambda: self.open_btn.setEnabled(bool(self.recent_list.selectedItems()))
         )
         return panel
+
+    def _build_empty_state(self) -> QWidget:
+        card = QFrame()
+        card.setObjectName("launcherEmpty")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(10)
+        layout.addStretch()
+
+        title = QLabel("No cases yet")
+        title.setObjectName("launcherEmptyTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.empty_lbl = QLabel(
+            "Create a case to keep results, bookmarks, extracted files and an "
+            "audit trail together in one folder. Or start a Quick Analysis to "
+            "look at an image without saving anything."
+        )
+        self.empty_lbl.setWordWrap(True)
+        self.empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_lbl.setObjectName("launcherEmptyText")
+
+        create = QPushButton("Create your first case")
+        create.setObjectName("primaryButton")
+        create.setFixedHeight(36)
+        create.clicked.connect(self._new_case)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(create)
+        row.addStretch()
+
+        layout.addWidget(title)
+        layout.addWidget(self.empty_lbl)
+        layout.addSpacing(8)
+        layout.addLayout(row)
+        layout.addStretch()
+        return card
 
     # ── Recent list ───────────────────────────────────────────────────────────
 
@@ -194,8 +232,7 @@ class CaseManager(QDialog):
             self.recent_list.addItem(item)
 
         has_entries = bool(entries)
-        self.recent_list.setVisible(has_entries)
-        self.empty_lbl.setVisible(not has_entries)
+        self.recent_stack.setCurrentIndex(0 if has_entries else 1)
 
     def _recent_menu(self, point):
         item = self.recent_list.itemAt(point)

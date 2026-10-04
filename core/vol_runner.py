@@ -26,6 +26,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,10 +34,102 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass
+from typing import Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 log = logging.getLogger("dumpscope.vol_runner")
+
+
+# ── Run gate ──────────────────────────────────────────────────────────────────
+
+class RunGate:
+    """
+    Caps how many volatility3 processes run at once.
+
+    Concurrent vol3 processes share one identifier cache and one symbol cache
+    on disk; two of them rebuilding it at the same moment is the usual way that
+    cache gets corrupted. They also each map the whole image, so on a large
+    dump several at once can exhaust memory. The default limit is therefore 1,
+    and every launch — plugins and the OS probe alike — queues here.
+
+    Waiting is done in short slices so a queued run can be cancelled without
+    ever having held a slot.
+    """
+
+    def __init__(self, limit: int = 1):
+        self._cond = threading.Condition()
+        self._limit = max(1, int(limit))
+        self._active = 0
+        self._waiting = 0
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def set_limit(self, limit: int) -> None:
+        with self._cond:
+            self._limit = max(1, int(limit))
+            self._cond.notify_all()
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    @property
+    def waiting(self) -> int:
+        return self._waiting
+
+    def acquire(self, cancelled: Callable[[], bool] = lambda: False,
+                poll: float = 0.1) -> bool:
+        """Block until a slot is free. False if `cancelled()` became true first."""
+        with self._cond:
+            self._waiting += 1
+            try:
+                while self._active >= self._limit:
+                    if cancelled():
+                        return False
+                    self._cond.wait(poll)
+                if cancelled():
+                    return False
+                self._active += 1
+                return True
+            finally:
+                self._waiting -= 1
+
+    def release(self) -> None:
+        with self._cond:
+            if self._active > 0:
+                self._active -= 1
+            self._cond.notify_all()
+
+
+RUN_GATE = RunGate(limit=1)
+
+
+# ── Symbol-cache corruption ───────────────────────────────────────────────────
+
+# vol3 keeps an SQLite identifier cache and decompressed ISF files under its
+# cache directory. An interrupted write leaves either one damaged, and every run
+# after that fails the same way until the cache is cleared. These are the
+# shapes that failure takes on stderr.
+_CACHE_CORRUPTION = re.compile(
+    r"database disk image is malformed"
+    r"|file is not a database"
+    r"|sqlite3\.(?:Database|Operational)Error"
+    r"|JSONDecodeError"
+    r"|LZMAError"
+    r"|Compressed file ended before the end-of-stream marker"
+    r"|Not a gzipped file"
+    r"|Invalid data stream"
+    r"|BadZipFile",
+    re.IGNORECASE,
+)
+
+
+def looks_like_cache_corruption(text: str) -> bool:
+    """True when vol3's stderr shows a damaged identifier or symbol cache."""
+    return bool(text) and _CACHE_CORRUPTION.search(text) is not None
 
 # Rows are handed to the UI in batches; a signal per row swamps the event loop
 # on plugins that emit tens of thousands of them (filescan, handles).
@@ -159,6 +252,16 @@ def find_vol3_command() -> list[str]:
     return list(command)
 
 
+def vol3_cache_path() -> str:
+    """Where vol3 keeps its identifier cache and decompressed symbols."""
+    try:
+        from volatility3.framework import constants
+        return constants.CACHE_PATH
+    except Exception:
+        from core.paths import cache_dir
+        return os.path.join(os.path.dirname(cache_dir()), "volatility3")
+
+
 def build_environment(symbol_dirs: list[str] | None = None) -> dict[str, str]:
     """Process environment for a vol3 run, with case symbol dirs taking priority."""
     env = os.environ.copy()
@@ -201,9 +304,14 @@ class RunSpec:
     output_dir: str = ""
     # vol3's own worker pool for a single plugin. "off" is its default.
     parallelism: str = ""
+    # Ask vol3 to discard its identifier/symbol cache before running. Set only
+    # on the automatic retry after a corrupted-cache failure.
+    clear_cache: bool = False
 
     def command(self) -> list[str]:
         command = find_vol3_command() + ["-r", "csv"]
+        if self.clear_cache:
+            command.append("--clear-cache")
         if self.output_dir:
             command += ["-o", os.path.abspath(self.output_dir)]
         if self.parallelism:
@@ -226,24 +334,32 @@ class VolatilityRunner(QThread):
     rows_ready(list)      a batch of rows, each a list[str] aligned to columns
     progress(float, str)  percentage 0-100 and the current stage description
     log_line(str)         human-readable notices (command line, warnings)
+    queued(int)           waiting behind this many other runs for the RunGate
     failed(str)           the run could not produce results; carries the reason
     run_finished(int)     process exit code; always emitted exactly once
+
+    A run whose stderr shows a corrupted vol3 cache, and which produced no
+    rows, is retried once with ``--clear-cache`` before being reported failed.
     """
 
     columns_ready = pyqtSignal(list)
     rows_ready    = pyqtSignal(list)
     progress      = pyqtSignal(float, str)
     log_line      = pyqtSignal(str)
+    queued        = pyqtSignal(int)
     failed        = pyqtSignal(str)
     run_finished  = pyqtSignal(int)
 
-    def __init__(self, spec: RunSpec, parent=None):
+    def __init__(self, spec: RunSpec, parent=None, gate: RunGate | None = None):
         super().__init__(parent)
         self.spec = spec
+        self.gate = gate if gate is not None else RUN_GATE
         self._proc: subprocess.Popen | None = None
         self._cancelled = False
         self._stderr_tail: list[str] = []
         self._row_count = 0
+        self._columns_sent = False
+        self.retried_after_cache_clear = False
 
     # ── Control ───────────────────────────────────────────────────────────────
 
@@ -270,8 +386,27 @@ class VolatilityRunner(QThread):
 
     def run(self):
         exit_code = 1
+        holding = False
         try:
+            if self.gate.active >= self.gate.limit:
+                self.queued.emit(self.gate.active)
+                self.log_line.emit("Queued: waiting for another volatility3 run to finish.")
+            holding = self.gate.acquire(cancelled=lambda: self._cancelled)
+            if not holding:
+                self.log_line.emit("Cancelled before it started.")
+                return
             exit_code = self._execute()
+            if (exit_code != 0 and not self._cancelled and not self._columns_sent
+                    and looks_like_cache_corruption("\n".join(self._stderr_tail))):
+                self.retried_after_cache_clear = True
+                self.log_line.emit(
+                    "volatility3's symbol cache looks corrupted — clearing it and "
+                    "retrying once.")
+                self.spec.clear_cache = True
+                self._stderr_tail = []
+                exit_code = self._execute()
+            if exit_code != 0 and not self._cancelled:
+                self.failed.emit(self._failure_message(exit_code))
         except FileNotFoundError as exc:
             self.failed.emit(
                 f"Could not launch volatility3: {exc}\n\n"
@@ -281,6 +416,8 @@ class VolatilityRunner(QThread):
             log.exception("Unhandled error running %s", self.spec.plugin_id)
             self.failed.emit(f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}")
         finally:
+            if holding:
+                self.gate.release()
             self.run_finished.emit(exit_code)
 
     def _execute(self) -> int:
@@ -296,6 +433,10 @@ class VolatilityRunner(QThread):
             env=build_environment(self.spec.symbol_dirs),
             creationflags=_creation_flags(),
         )
+        # cancel() may have run between the flag check and _proc being set, in
+        # which case it found nothing to terminate.
+        if self._cancelled:
+            self._terminate()
 
         stderr_thread = threading.Thread(
             target=self._drain_stderr, name="vol3-stderr", daemon=True
@@ -308,6 +449,10 @@ class VolatilityRunner(QThread):
             self._proc.stdout, encoding="utf-8", errors="replace", newline=""
         )
         self._consume_rows(stdout)
+        if self._cancelled:
+            # Reading stopped early; a process still writing would block on a
+            # full stdout pipe and wait() would never return.
+            self._terminate()
 
         self._proc.wait()
         stderr_thread.join(timeout=2.0)
@@ -315,11 +460,21 @@ class VolatilityRunner(QThread):
 
         if self._cancelled:
             self.log_line.emit("Cancelled by user.")
-        elif code != 0:
-            self.failed.emit(self._failure_message(code))
 
         self._proc = None
         return code
+
+    def _terminate(self) -> None:
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        except Exception:
+            pass
 
     def _consume_rows(self, stdout) -> None:
         reader = csv.reader(stdout, escapechar="\\")
@@ -335,6 +490,7 @@ class VolatilityRunner(QThread):
 
             if not columns:
                 columns = [c.strip() for c in record]
+                self._columns_sent = True
                 self.columns_ready.emit(columns)
                 continue
 
@@ -405,7 +561,13 @@ class VolatilityRunner(QThread):
         tail = "\n".join(self._stderr_tail[-15:]).strip()
         hint = ""
         lowered = tail.lower()
-        if "symbol" in lowered and ("not found" in lowered or "unsatisfied" in lowered):
+        if looks_like_cache_corruption(tail):
+            hint = (
+                "\n\nvolatility3's cache appears to be corrupted"
+                + (" and clearing it did not help" if self.retried_after_cache_clear else "")
+                + ". Delete the folder below and try again:\n" + vol3_cache_path()
+            )
+        elif "symbol" in lowered and ("not found" in lowered or "unsatisfied" in lowered):
             hint = (
                 "\n\nThis usually means the symbol table for this image is missing. "
                 "Open Symbols & YARA to fetch or import one."
