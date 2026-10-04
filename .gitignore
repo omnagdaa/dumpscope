@@ -10,3 +10,7 @@ wheels/
 .venv
 .vscode
 .vexp
+
+# Generated analysis output
+graphify-out/
+.pytest_cache/

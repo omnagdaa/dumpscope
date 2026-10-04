@@ -1,191 +1,267 @@
+"""
+Symbols & YARA for one case.
+
+Symbols live in the case: `<case>/symbols`. The primary action fetches the
+symbol table for the loaded image only (a few megabytes, straight from
+Microsoft's symbol server via volatility3); the bulk packs remain for offline
+work. volatility3's shared per-user cache is never read or written by a case,
+so a case folder carries every symbol table its results depended on.
+"""
+
+from __future__ import annotations
+
 import os
+
+from PyQt6.QtCore import QUrl
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QComboBox, QTextEdit, QGroupBox, QFileDialog,
-    QListWidget, QListWidgetItem, QWidget
+    QComboBox, QDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget,
+    QListWidgetItem, QProgressBar, QPushButton, QTextEdit, QVBoxLayout,
 )
-from PyQt6.QtCore import Qt
-from core.symbol_downloader import SymbolDownloader
+
+from core.symbol_downloader import SymbolDownloader, SymbolFetcher, list_symbols
+from ui.theme import restyle
+
+YARA_SUFFIXES = (".yar", ".yara", ".rule", ".rules")
+
+
+def _size(count: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if count < 1024:
+            return f"{count:.0f} {unit}" if unit == "B" else f"{count:.1f} {unit}"
+        count /= 1024
+    return f"{count:.1f} TB"
 
 
 class SymbolDialog(QDialog):
-    def __init__(self, base_dir: str, parent=None):
+    def __init__(self, base_dir: str, parent=None, image_path: str = "",
+                 case_mode: bool = True):
         super().__init__(parent)
         self.base_dir = base_dir
+        self.image_path = image_path
+        self.case_mode = case_mode
         self.symbols_dir = os.path.join(base_dir, "symbols")
         self.yara_dir = os.path.join(base_dir, "yara")
-        self._downloader = None
-        self.setWindowTitle("Symbols & YARA Manager")
-        self.setMinimumSize(600, 500)
+        self._downloader: SymbolDownloader | None = None
+        self._fetcher: SymbolFetcher | None = None
+        self.setWindowTitle("Symbols & YARA")
+        self.setMinimumSize(700, 660)
         self._build()
         self._refresh_status()
+
+    # ── Construction ──────────────────────────────────────────────────────────
 
     def _build(self):
         layout = QVBoxLayout(self)
         layout.setSpacing(14)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        # ── Symbols ──────────────────────────────────────────────────────────
-        sym_grp = QGroupBox("Volatility3 Symbol Tables")
+        sym_grp = QGroupBox("Symbol tables for this case")
         sym_layout = QVBoxLayout(sym_grp)
-
+        where = QLabel(
+            f"Stored in {self.symbols_dir}\n"
+            "Only this folder is used — volatility3's shared cache is not, so the "
+            "case carries every symbol table its results depend on."
+            if self.case_mode else
+            "Quick Analysis has no case folder, so volatility3's own shared symbol "
+            "cache is used.")
+        where.setObjectName("fieldHint")
+        where.setWordWrap(True)
+        where.setMinimumHeight(where.sizeHint().height() + 14)
         self.sym_status = QLabel("")
         self.sym_status.setWordWrap(True)
-        self.sym_status.setStyleSheet("font-size: 12px;")
+        self.sym_list = QListWidget()
+        self.sym_list.setMaximumHeight(110)
+        self.sym_list.setAlternatingRowColors(True)
 
-        row = QHBoxLayout()
+        fetch_row = QHBoxLayout()
+        self.fetch_btn = QPushButton("Fetch Symbols for This Image")
+        self.fetch_btn.setObjectName("primaryButton")
+        self.fetch_btn.setToolTip(
+            "Downloads only the kernel PDB this image needs from Microsoft's "
+            "symbol server and converts it into the case. Needs network access.")
+        self.fetch_btn.clicked.connect(self._start_fetch)
+        self.fetch_btn.setEnabled(self.case_mode and bool(self.image_path)
+                                  and os.path.isfile(self.image_path))
+        open_btn = QPushButton("Open Folder")
+        open_btn.clicked.connect(lambda: self._open_dir(self.symbols_dir))
+        open_btn.setEnabled(self.case_mode)
+        fetch_row.addWidget(self.fetch_btn)
+        fetch_row.addWidget(open_btn)
+        fetch_row.addStretch()
+
+        pack_row = QHBoxLayout()
+        pack_lbl = QLabel("Offline? Full pack:")
+        pack_lbl.setObjectName("fieldHint")
         self.pack_combo = QComboBox()
         self.pack_combo.addItems(["windows", "linux", "mac"])
-        self.pack_combo.setFixedWidth(120)
-
-        self.dl_btn = QPushButton("⬇  Download")
-        self.dl_btn.setObjectName("primaryBtn")
-        self.dl_btn.setFixedWidth(130)
+        self.pack_combo.setFixedWidth(110)
+        self.dl_btn = QPushButton("Download Pack")
+        self.dl_btn.setToolTip("Every known kernel for that OS. Large: the Windows "
+                               "pack runs to gigabytes.")
         self.dl_btn.clicked.connect(self._start_download)
-
-        open_btn = QPushButton("📂  Open Folder")
-        open_btn.setFixedWidth(130)
-        open_btn.clicked.connect(lambda: self._open_dir(self.symbols_dir))
-
-        row.addWidget(QLabel("Pack:"))
-        row.addWidget(self.pack_combo)
-        row.addSpacing(10)
-        row.addWidget(self.dl_btn)
-        row.addWidget(open_btn)
-        row.addStretch()
+        self.dl_btn.setEnabled(self.case_mode)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setVisible(False)
+        self.cancel_btn.clicked.connect(self._cancel)
+        pack_row.addWidget(pack_lbl)
+        pack_row.addWidget(self.pack_combo)
+        pack_row.addWidget(self.dl_btn)
+        pack_row.addStretch()
+        pack_row.addWidget(self.cancel_btn)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setFixedHeight(8)
         self.progress_bar.setTextVisible(False)
-
         self.dl_log = QTextEdit()
         self.dl_log.setReadOnly(True)
-        self.dl_log.setMaximumHeight(80)
-        self.dl_log.setPlaceholderText("Download log …")
+        self.dl_log.setMinimumHeight(70)
+        self.dl_log.setMaximumHeight(110)
+        self.dl_log.setPlaceholderText("Activity…")
 
-        sym_layout.addWidget(self.sym_status)
-        sym_layout.addLayout(row)
+        for widget in (where, self.sym_status, self.sym_list):
+            sym_layout.addWidget(widget)
+        sym_layout.addLayout(fetch_row)
+        sym_layout.addLayout(pack_row)
         sym_layout.addWidget(self.progress_bar)
         sym_layout.addWidget(self.dl_log)
 
-        # ── YARA ─────────────────────────────────────────────────────────────
-        yara_grp = QGroupBox("YARA Rules")
+        yara_grp = QGroupBox("YARA rules")
         yara_layout = QVBoxLayout(yara_grp)
-
-        yara_info = QLabel(
-            f"Place .yar / .yara rule files in:\n  {self.yara_dir}"
-        )
-        yara_info.setStyleSheet("color: #8b949e; font-size: 12px;")
-
-        yara_btn_row = QHBoxLayout()
-        open_yara_btn = QPushButton("📂  Open YARA Folder")
+        yara_info = QLabel(f"Rule files (.yar, .yara) in {self.yara_dir} are used "
+                           "by YARA Scan.")
+        yara_info.setObjectName("fieldHint")
+        yara_info.setWordWrap(True)
+        yara_row = QHBoxLayout()
+        open_yara_btn = QPushButton("Open YARA Folder")
         open_yara_btn.clicked.connect(lambda: self._open_dir(self.yara_dir))
-        refresh_yara_btn = QPushButton("🔄  Refresh")
+        refresh_yara_btn = QPushButton("Refresh")
         refresh_yara_btn.clicked.connect(self._refresh_yara)
-        yara_btn_row.addWidget(open_yara_btn)
-        yara_btn_row.addWidget(refresh_yara_btn)
-        yara_btn_row.addStretch()
-
+        yara_row.addWidget(open_yara_btn)
+        yara_row.addWidget(refresh_yara_btn)
+        yara_row.addStretch()
         self.yara_list = QListWidget()
-        self.yara_list.setMaximumHeight(120)
+        self.yara_list.setMaximumHeight(90)
         self.yara_list.setAlternatingRowColors(True)
-
         yara_layout.addWidget(yara_info)
-        yara_layout.addLayout(yara_btn_row)
+        yara_layout.addLayout(yara_row)
         yara_layout.addWidget(self.yara_list)
-
-        # ── Close ─────────────────────────────────────────────────────────────
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        close_btn.setFixedWidth(100)
 
         close_row = QHBoxLayout()
         close_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setFixedWidth(100)
+        close_btn.clicked.connect(self.accept)
         close_row.addWidget(close_btn)
 
         layout.addWidget(sym_grp)
         layout.addWidget(yara_grp)
         layout.addLayout(close_row)
 
+    # ── Status ────────────────────────────────────────────────────────────────
+
     def _refresh_status(self):
-        os.makedirs(self.symbols_dir, exist_ok=True)
-        os.makedirs(self.yara_dir, exist_ok=True)
-
-        packs_found = []
-        for root, dirs, files in os.walk(self.symbols_dir):
-            for f in files:
-                if f.endswith((".zip", ".json", ".json.xz", ".json.gz")):
-                    pack = os.path.relpath(root, self.symbols_dir).split(os.sep)[0]
-                    if pack and pack not in packs_found:
-                        packs_found.append(pack)
-
-        if packs_found:
+        self.sym_list.clear()
+        found = list_symbols(self.base_dir) if self.case_mode else []
+        for path, size in found:
+            self.sym_list.addItem(QListWidgetItem(f"{path}    {_size(size)}"))
+        self.sym_list.setVisible(bool(found))
+        if found:
+            total = sum(size for _, size in found)
+            self.sym_status.setText(f"{len(found)} symbol table(s), {_size(total)}.")
+            self.sym_status.setObjectName("hintOk")
+        elif self.case_mode:
             self.sym_status.setText(
-                f"✓  Installed packs: {', '.join(packs_found)}"
-            )
-            self.sym_status.setStyleSheet("color: #3fb950; font-size: 12px;")
+                "No symbol tables yet. Fetch the ones this image needs, or load "
+                "the image and run a plugin — volatility3 fetches them into the "
+                "case automatically when it has network access.")
+            self.sym_status.setObjectName("hintWarn")
         else:
-            self.sym_status.setText(
-                "⚠  No symbol packs found. Download at least 'windows' to analyse Windows memory dumps."
-            )
-            self.sym_status.setStyleSheet("color: #f0883e; font-size: 12px;")
-
+            self.sym_status.setText("")
+        restyle(self.sym_status)
         self._refresh_yara()
 
     def _refresh_yara(self):
-        os.makedirs(self.yara_dir, exist_ok=True)
         self.yara_list.clear()
-        rules = [
-            f for f in os.listdir(self.yara_dir)
-            if f.endswith((".yar", ".yara", ".rule"))
-        ]
-        if rules:
-            for r in sorted(rules):
-                self.yara_list.addItem(QListWidgetItem(f"🎯  {r}"))
-        else:
-            self.yara_list.addItem(
-                QListWidgetItem("  No .yar / .yara files found in yara folder.")
-            )
+        rules = []
+        if os.path.isdir(self.yara_dir):
+            rules = sorted(f for f in os.listdir(self.yara_dir)
+                           if f.lower().endswith(YARA_SUFFIXES))
+        for rule in rules:
+            self.yara_list.addItem(QListWidgetItem(rule))
+        if not rules:
+            self.yara_list.addItem(QListWidgetItem("No rule files in the yara folder."))
+
+    def _busy(self, busy: bool):
+        self.fetch_btn.setEnabled(not busy and self.case_mode and bool(self.image_path)
+                                  and os.path.isfile(self.image_path))
+        self.dl_btn.setEnabled(not busy and self.case_mode)
+        self.cancel_btn.setVisible(busy)
+        self.progress_bar.setVisible(busy)
+
+    # ── Fetch for this image ──────────────────────────────────────────────────
+
+    def _start_fetch(self):
+        self._busy(True)
+        self.progress_bar.setRange(0, 0)              # indeterminate
+        self.dl_log.clear()
+        self._fetcher = SymbolFetcher(self.image_path, self.base_dir, parent=self)
+        self._fetcher.progress.connect(self.dl_log.append)
+        self._fetcher.done.connect(self._on_fetch_done)
+        self._fetcher.start()
+
+    def _on_fetch_done(self, ok: bool, message: str, added: list):
+        self.progress_bar.setRange(0, 100)
+        self._busy(False)
+        self.dl_log.append(("✓ " if ok else "✗ ") + message)
+        for path in added:
+            self.dl_log.append(f"  + {path}")
+        if self._fetcher is not None:
+            self._fetcher.wait(2000)
+            self._fetcher = None
+        self._refresh_status()
+
+    # ── Full pack ─────────────────────────────────────────────────────────────
 
     def _start_download(self):
         pack = self.pack_combo.currentText()
-        self.dl_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
+        self._busy(True)
         self.progress_bar.setValue(0)
         self.dl_log.clear()
-        self.dl_log.append(f"Starting download: {pack} …")
-
+        self.dl_log.append(f"Starting download: {pack}…")
         self._downloader = SymbolDownloader(self.base_dir, pack, parent=self)
         self._downloader.progress.connect(self.dl_log.append)
         self._downloader.percent.connect(self.progress_bar.setValue)
-        self._downloader.finished.connect(self._on_download_done)
+        self._downloader.done.connect(self._on_download_done)
         self._downloader.start()
 
     def _on_download_done(self, success: bool, msg: str):
-        self.dl_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.dl_log.append("✓  " + msg if success else "✗  " + msg)
-        self._refresh_status()
+        self._busy(False)
+        self.dl_log.append(("✓ " if success else "✗ ") + msg)
         if self._downloader:
-            self._downloader.wait()
+            self._downloader.wait(2000)
             self._downloader = None
+        self._refresh_status()
+
+    def _cancel(self):
+        for worker in (self._fetcher, self._downloader):
+            if worker is not None:
+                worker.cancel()
+
+    def closeEvent(self, event):
+        self._cancel()
+        for worker in (self._fetcher, self._downloader):
+            if worker is not None:
+                worker.wait(5000)
+        super().closeEvent(event)
 
     def _open_dir(self, path: str):
         os.makedirs(path, exist_ok=True)
-        import subprocess, sys
-        if sys.platform == "linux":
-            subprocess.Popen(["xdg-open", path])
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["explorer", path])
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
 
     def get_yara_files(self) -> list[str]:
-        """Return list of full paths to all yara rule files."""
-        os.makedirs(self.yara_dir, exist_ok=True)
-        return [
-            os.path.join(self.yara_dir, f)
-            for f in sorted(os.listdir(self.yara_dir))
-            if f.endswith((".yar", ".yara", ".rule"))
-        ]
+        if not os.path.isdir(self.yara_dir):
+            return []
+        return [os.path.join(self.yara_dir, f) for f in sorted(os.listdir(self.yara_dir))
+                if f.lower().endswith(YARA_SUFFIXES)]
