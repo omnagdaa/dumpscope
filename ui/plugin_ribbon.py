@@ -18,7 +18,7 @@ from __future__ import annotations
 from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget,
 )
 
 from core.plugins import PluginInfo, PluginRegistry
@@ -43,7 +43,7 @@ class PluginRibbon(QWidget):
         self.registry = registry
         self._compact = compact
         self._os = ""
-        self._buttons: dict[str, "PluginButton"] = {}
+        self._buttons: dict[str, QWidget] = {}          # id -> PluginButton
         self._groups: list[tuple[str, QWidget, list[str]]] = []
         self._dividers: list[QWidget] = []
         self._icon_buttons: list[QPushButton] = []

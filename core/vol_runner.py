@@ -191,6 +191,9 @@ _COMMAND_CACHE: list[str] | None = None
 # volatility3.cli is a package with no __main__, so ``-m volatility3.cli``
 # refuses to run; the installed script calls ``main()`` from it directly, and
 # so does this.
+# -P keeps the working directory off sys.path: `python -c` would otherwise
+# import a planted volatility3/ from whatever folder DumpScope was started in.
+#
 # argv[0] is rewritten because volatility3's parser reads it: left as "-c" it
 # is taken for the --config flag and the run dies on argument parsing.
 #
@@ -242,7 +245,7 @@ def _module_command() -> list[str] | None:
             return None
     except (ImportError, ValueError, ModuleNotFoundError):
         return None
-    return [executable, "-c", _CLI_ENTRY]
+    return [executable, "-P", "-c", _CLI_ENTRY]
 
 
 def _script_command() -> list[str] | None:
@@ -286,7 +289,7 @@ def find_vol3_command() -> list[str]:
         command = _script_command()
         if command is None:
             log.warning("No volatility3 found — calling the library directly")
-            command = [sys.executable, "-c", _CLI_ENTRY]
+            command = [sys.executable, "-P", "-c", _CLI_ENTRY]
         else:
             log.info("Using the vol3 script at %s", command[0])
     else:
@@ -428,7 +431,6 @@ class VolatilityRunner(QThread):
         self._proc: subprocess.Popen | None = None
         self._cancelled = False
         self._stderr_tail: list[str] = []
-        self._row_count = 0
         self._columns_sent = False
         self.retried_after_cache_clear = False
 
@@ -448,10 +450,6 @@ class VolatilityRunner(QThread):
     @property
     def cancelled(self) -> bool:
         return self._cancelled
-
-    @property
-    def row_count(self) -> int:
-        return self._row_count
 
     # ── Execution ─────────────────────────────────────────────────────────────
 
@@ -591,7 +589,6 @@ class VolatilityRunner(QThread):
                 record = head + [",".join(record[len(columns) - 1:])]
 
             batch.append(record)
-            self._row_count += 1
 
             now = time.monotonic()
             if len(batch) >= _BATCH_ROWS or (now - last_flush) >= _BATCH_SECONDS:

@@ -155,9 +155,11 @@ def db_filename(case_name: str) -> str:
     The database file name for a case. Case.db_path uses this too, so the two
     can never disagree about where a case's database is.
     """
-    safe_name = "".join(
+    from core.case import fit_filename
+    # 240, not 250: SQLite's WAL puts "<name>.db-wal" beside it, 7 bytes longer.
+    safe_name = fit_filename("".join(
         ch if ch.isalnum() or ch in "-_" else "_" for ch in (case_name or "")
-    ).strip("_") or "case"
+    ), 240).strip("_") or "case"
     return f"{safe_name}.db"
 
 
@@ -428,7 +430,7 @@ class Database:
         try:
             columns = json.loads(row["columns"]) if row["columns"] else []
             rows = json.loads(row["result_json"]) if row["result_json"] else []
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, RecursionError) as exc:   # nested-JSON bomb
             log.warning("Stored result %s is unreadable: %s", result_id, exc)
             return None
         if not isinstance(columns, list) or not isinstance(rows, list):
@@ -503,7 +505,7 @@ class Database:
         raw = record.get("row_json")
         try:
             record["row"] = json.loads(raw) if raw else {}
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             record["row"] = {}
         return record
 
@@ -583,16 +585,6 @@ class Database:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM data_sources WHERE id = ?", (source_id,)
-            ).fetchone()
-        return dict(row) if row else None
-
-    def find_data_source(self, path: str) -> dict | None:
-        if self.case_id is None:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM data_sources WHERE case_id = ? AND path = ?",
-                (self.case_id, os.path.abspath(path)),
             ).fetchone()
         return dict(row) if row else None
 

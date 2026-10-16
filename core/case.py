@@ -35,14 +35,27 @@ from core.paths import config_dir
 log = logging.getLogger("dumpscope.case")
 
 CASE_FILE = "case.json"
+# Owner-only: a case holds password hashes and LSASS memory. Applies to folders
+# DumpScope creates; Windows ignores it and uses the parent folder's ACL.
+PRIVATE = 0o700
 CASE_SUBDIRS = ("symbols", "cache", "yara", "exports", "dumps", "reports", "logs")
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
+def fit_filename(name: str, limit: int = 250) -> str:
+    """
+    `name` cut to `limit` UTF-8 bytes, inside the 255-byte filename limit.
+
+    Any name short enough to have worked before is returned unchanged, so an
+    existing case still finds its folder and its database.
+    """
+    return name.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
 def safe_dirname(name: str) -> str:
     """A filesystem-safe folder name derived from a case name."""
-    cleaned = _UNSAFE.sub("_", name).strip("._-")
+    cleaned = fit_filename(_UNSAFE.sub("_", name)).strip("._-")
     return cleaned or "case"
 
 
@@ -90,7 +103,7 @@ class Case:
 
     def subdir(self, name: str) -> str:
         path = os.path.join(self.directory, name)
-        os.makedirs(path, exist_ok=True)
+        os.makedirs(path, mode=PRIVATE, exist_ok=True)
         return path
 
     @property
@@ -136,7 +149,7 @@ class Case:
                 "Open it instead, or choose a different name."
             )
         try:
-            os.makedirs(directory, exist_ok=True)
+            os.makedirs(directory, mode=PRIVATE, exist_ok=True)
         except OSError as exc:
             raise CaseError(f"Could not create the case folder:\n{exc}") from exc
 
@@ -159,7 +172,7 @@ class Case:
         try:
             with open(path, encoding="utf-8") as handle:
                 data = json.load(handle)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:   # incl. nested-JSON bomb
             raise CaseError(f"The case file could not be read:\n{exc}") from exc
         if not isinstance(data, dict):
             raise CaseError(f"The case file is not a case record:\n{path}")
@@ -268,7 +281,7 @@ def load_recent() -> list[dict]:
     try:
         with open(path, encoding="utf-8") as handle:
             entries = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         log.warning("Could not read the recent-case list: %s", exc)
         return []
     if not isinstance(entries, list):

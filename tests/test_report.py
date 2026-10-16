@@ -1,12 +1,11 @@
 """Case report generation."""
 import json
-import os
 
 import pytest
 
 from core.case import Case
 from core.database import Database
-from core.report import build_html, build_json, write_report
+from core.report import build_html, build_json
 
 
 @pytest.fixture
@@ -103,16 +102,6 @@ def test_json_report_round_trips(populated):
     assert payload["case"]["case_name"] == "Op Nightfall"
     assert len(payload["data_sources"]) == 1
     assert payload["bookmarks"][0]["tag"] == "Suspicious"
-
-
-def test_write_report_creates_the_file(populated, tmp_path):
-    case, db = populated
-    path = os.path.join(case.reports_dir, "case.html")
-    write_report(path, case, db.get_data_sources(), db.get_results(),
-                 db.get_bookmarks(), db.get_audit_log())
-
-    assert os.path.isfile(path)
-    assert "Op Nightfall" in open(path, encoding="utf-8").read()
 
 
 def test_empty_case_still_produces_a_report(tmp_path):

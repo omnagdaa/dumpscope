@@ -6,7 +6,6 @@ Every test here asserts that `run_finished` arrives. A runner that never emits
 it leaves a tab spinning forever and a slot in the RunGate held, so "it did not
 hang" is the property under test as much as the output is.
 """
-import sys
 import time
 
 import pytest

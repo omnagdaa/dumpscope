@@ -147,7 +147,7 @@ class TestFindingVolatility3:
     def test_prefers_the_library_over_the_installed_script(self):
         command = vol_runner.find_vol3_command()
         assert command[0] == sys.executable
-        assert command[1] == "-c"
+        assert command[1:3] == ["-P", "-c"]
         assert not any(part.endswith(("vol", "vol.exe")) for part in command)
 
     def test_the_entry_point_rewrites_argv0(self):

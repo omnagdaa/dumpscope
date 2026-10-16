@@ -25,8 +25,7 @@ import logging
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
-from typing import Iterable
+from dataclasses import dataclass
 
 from core.paths import cache_dir
 
@@ -148,8 +147,8 @@ def introspect(python: str | None = None, timeout: int = 180) -> dict:
     """
     python = python or sys.executable
     proc = subprocess.run(
-        [python, "-c", _INTROSPECT_SRC],
-        capture_output=True, text=True, timeout=timeout,
+        [python, "-P", "-c", _INTROSPECT_SRC],     # -P: no imports from the cwd
+        capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
         creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
     )
     if proc.returncode != 0:

@@ -11,7 +11,6 @@ types from the legend.
 
 from __future__ import annotations
 
-import csv
 from datetime import datetime, timedelta, timezone
 
 from PyQt6.QtCore import (
@@ -25,12 +24,13 @@ from PyQt6.QtWidgets import (
     QSplitter, QStackedWidget, QTableView, QToolTip, QVBoxLayout, QWidget,
 )
 
+from core.report_bundle import write_csv
 from core.timeline import (
     EVENT_COLUMNS, KIND_COLORS, KIND_LABELS, KINDS, Event, build_events,
     filter_events, format_time, histogram,
 )
 from ui import icons
-from ui.theme import palette, readable
+from ui.theme import palette, plain, readable
 
 
 def _tick_label(moment: datetime, span: timedelta) -> str:
@@ -245,9 +245,6 @@ class TimelineChart(QWidget):
         self._kinds = set(kinds)
         self._rebin()
 
-    def view_range(self):
-        return self._start, self._end
-
     def bucket_count(self) -> int:
         return max(10, min(160, int(self._plot_rect().width() // 9)))
 
@@ -443,7 +440,7 @@ class EventModel(QAbstractTableModel):
             return QColor(readable(KIND_COLORS.get(event.kind, KIND_COLORS["other"]),
                                    getattr(self, "dark", True)))
         if role == Qt.ItemDataRole.ToolTipRole:
-            return event.detail or event.summary
+            return plain(event.detail or event.summary)
         return None
 
 
@@ -692,11 +689,7 @@ class TimelineView(QWidget):
 
     def export_csv(self, path: str) -> int:
         events = self.model.events
-        with open(path, "w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(EVENT_COLUMNS + ["Detail"])
-            for event in events:
-                writer.writerow(event.as_row() + [event.detail])
+        write_csv(path, EVENT_COLUMNS + ["Detail"], (e.as_row() + [e.detail] for e in events))
         return len(events)
 
     def _export(self):

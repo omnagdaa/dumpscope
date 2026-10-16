@@ -41,7 +41,6 @@ from core.vol_runner import (
 
 log = logging.getLogger("dumpscope.os_detect")
 
-SUPPORTED = ("windows", "linux", "mac")
 
 # Signatures found at offset 0. Everything here is a container format that
 # states its own type; a plain `.raw` / `.mem` dump matches none of them.
@@ -114,7 +113,10 @@ def _run_vol(command: list[str], symbol_dirs: list[str], timeout: int):
     """Run a vol3 command to completion. Returns (returncode, stdout, stderr)."""
     proc = subprocess.Popen(
         command,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        # Banners are raw strings from image memory; one bad byte must not
+        # abort identification.
+        encoding="utf-8", errors="replace",
         env=build_environment(symbol_dirs), creationflags=_creation_flags(),
     )
     try:
@@ -335,7 +337,10 @@ class ImageProbe(QThread):
         try:
             proc = subprocess.Popen(
                 command,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        # Banners are raw strings from image memory; one bad byte must not
+        # abort identification.
+        encoding="utf-8", errors="replace",
                 env=build_environment(self.symbol_dirs), creationflags=_creation_flags(),
             )
             self._proc = proc

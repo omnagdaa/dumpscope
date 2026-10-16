@@ -10,7 +10,7 @@ import pytest
 
 from core.database import Database
 from core.case import Case
-from core.report import build_html, build_json, write_report
+from core.report import build_html, build_json
 
 
 @pytest.fixture
@@ -111,10 +111,3 @@ def test_json_carries_the_extractions_and_output(case_with_extractions):
     assert payload["output"]["windows.pslist.PsList"]["rows"][0] == ["1", "proc1.exe"]
 
 
-def test_write_report_round_trips(case_with_extractions, tmp_path):
-    case, db, _result_id, _carved = case_with_extractions
-    path = str(tmp_path / "out" / "report.html")
-    write_report(path, case, db.get_data_sources(), db.get_results(),
-                 db.get_bookmarks(), db.get_audit_log(),
-                 extractions=db.get_extractions())
-    assert "pid.820" in open(path, encoding="utf-8").read()

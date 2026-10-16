@@ -28,7 +28,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QColor, QFont
 
-from ui.theme import mono_family, palette
+from ui.theme import mono_family, palette, plain
 
 TREE_DEPTH_COLUMN = "TreeDepth"
 
@@ -182,6 +182,11 @@ class ResultTableModel(QAbstractTableModel):
             return self._columns[section] if section < len(self._columns) else None
         return section + 1
 
+    # Text layout is linear in length and runs on every paint: one megabyte
+    # command line freezes the table for seconds per repaint. Cells are capped
+    # for display only; copy, export, bookmarks and filtering use the full value.
+    DISPLAY_LIMIT = 1000
+
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
@@ -191,12 +196,14 @@ class ResultTableModel(QAbstractTableModel):
         value = self._rows[row][col]
 
         if role == Qt.ItemDataRole.DisplayRole:
+            if len(value) > self.DISPLAY_LIMIT:
+                value = value[:self.DISPLAY_LIMIT] + "…"
             if col == 0 and self._depths and self._depths[row]:
                 return "    " * self._depths[row] + value
             return value
 
         if role == Qt.ItemDataRole.ToolTipRole:
-            return value if len(value) > 40 else None
+            return plain(value) if len(value) > 40 else None
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if self._types[col] in (TYPE_INT, TYPE_HEX, TYPE_FLOAT):

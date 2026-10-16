@@ -90,7 +90,7 @@ def load(refresh: bool = False) -> dict:
                         log.warning("Ignoring invalid %s=%r in settings", key, value)
     except FileNotFoundError:
         pass
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:   # nested-JSON bomb
         log.warning("Could not read %s: %s", settings_file(), exc)
     _cache = values
     return values
@@ -122,6 +122,3 @@ def save(**changes) -> dict:
     return values
 
 
-def reset() -> dict:
-    """Back to the defaults, on disk as well as in memory."""
-    return save(**DEFAULTS)

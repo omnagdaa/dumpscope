@@ -122,6 +122,7 @@ def test_parallel_runs_setting_applies_and_persists(qapp, tmp_path, registry):
     assert settings.load(refresh=True)["max_parallel_runs"] == 3
 
     checked = [a.data() for a in window.parallel_group.actions() if a.isChecked()]
+    assert checked == [3], "the menu must show the limit that is in force"
     window.close()
 
     # A new window picks the stored value up.

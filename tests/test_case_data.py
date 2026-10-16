@@ -1,5 +1,4 @@
 """Data sources, tags and bookmarks — the case-management layer of the database."""
-import os
 
 import pytest
 

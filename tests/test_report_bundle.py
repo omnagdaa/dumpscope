@@ -199,13 +199,20 @@ def test_unrecorded_files_in_dumps_are_included_too(case_db):
     assert os.path.exists(os.path.join(result.path, "dumps", "manual", "notes.bin"))
 
 
-def test_extraction_outside_the_dumps_folder_is_brought_in(case_db, tmp_path):
+def test_files_outside_the_case_are_never_bundled(case_db, tmp_path):
+    # A handed-over case could carry a forged extraction row, or a symlink in
+    # dumps/, pointing at the examiner's own files. Neither may leave with the report.
     case, db, source_id = case_db
-    outside = tmp_path / "elsewhere.bin"
-    outside.write_bytes(b"outside")
-    db.record_extraction(str(outside), "p", source_id=source_id)
+    secret = tmp_path / "id_rsa"
+    secret.write_bytes(b"PRIVATE KEY")
+    db.record_extraction(str(secret), "p", source_id=source_id)
+    os.symlink(secret, os.path.join(case.dumps_dir, "innocent.bin"))
     result = build_bundle(case, db)
-    assert os.path.exists(os.path.join(result.path, "dumps", "external", "elsewhere.bin"))
+    for base, _dirs, names in os.walk(result.path):
+        for name in names:
+            with open(os.path.join(base, name), "rb") as handle:
+                assert b"PRIVATE KEY" not in handle.read()
+    assert sum("outside the case folder" in w for w in result.warnings) == 2
 
 
 def test_deleted_dump_is_reported_not_fatal(case_db):

@@ -14,7 +14,9 @@ class HashWorker(QThread):
 
     def run(self):
         try:
-            md5 = hashlib.md5()
+            # A checksum for the evidence record, not security; without the flag a
+            # FIPS-mode system refuses md5 outright.
+            md5 = hashlib.md5(usedforsecurity=False)
             sha256 = hashlib.sha256()
             total = os.path.getsize(self.file_path)
             done = 0

@@ -19,6 +19,21 @@ def qapp():
 
 
 @pytest.fixture
+def timeline(qapp):
+    """A timeline view showing every fixture plugin's events (the compromised host)."""
+    from PyQt6.QtWidgets import QApplication
+    from tests.vol_fixtures import all_payloads
+    from ui.timeline_view import TimelineView
+    view = TimelineView()
+    view.resize(1200, 700)
+    view.show()
+    view.set_payloads(all_payloads(), missing=["windows.netscan.NetScan"])
+    QApplication.processEvents()
+    yield view
+    view.close()
+
+
+@pytest.fixture
 def stub_vol(monkeypatch):
     """Point the runner at a stub that emits the awkward output shapes vol3 can."""
     import core.vol_runner as vol_runner

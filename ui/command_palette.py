@@ -16,13 +16,12 @@ accident.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout,
-    QWidget,
 )
 
 from ui import icons

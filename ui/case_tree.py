@@ -17,8 +17,8 @@ from __future__ import annotations
 import os
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont
-from ui.theme import palette
+from PyQt6.QtGui import QBrush, QColor
+from ui.theme import palette, plain
 from PyQt6.QtWidgets import (
     QAbstractItemView, QMenu, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -133,7 +133,7 @@ class CaseTree(QWidget):
                 details.append("hashed")
             if missing:
                 details.append("FILE MISSING")
-            item.setToolTip(0, source["path"] + "\n" + " · ".join(details))
+            item.setToolTip(0, plain(source["path"] + "\n" + " · ".join(details)))
 
             if missing:
                 item.setForeground(0, QBrush(self._danger))
@@ -164,7 +164,7 @@ class CaseTree(QWidget):
                 tooltip.append(f"from {result['source_name']}")
             if result.get("created_at"):
                 tooltip.append(result["created_at"])
-            item.setToolTip(0, "\n".join(tooltip))
+            item.setToolTip(0, plain("\n".join(tooltip)))
 
         if not results:
             placeholder = QTreeWidgetItem(self.results_group, ["Nothing saved yet"])
@@ -190,7 +190,7 @@ class CaseTree(QWidget):
                 tooltip.append(bookmark["notes"])
             if bookmark.get("description"):
                 tooltip.append(bookmark["description"])
-            item.setToolTip(0, "\n".join(t for t in tooltip if t))
+            item.setToolTip(0, plain("\n".join(t for t in tooltip if t)))
 
         if not bookmarks:
             placeholder = QTreeWidgetItem(self.bookmarks_group, ["No bookmarks"])

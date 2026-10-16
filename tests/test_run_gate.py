@@ -5,7 +5,6 @@ raises the limit, and a queued run can always be cancelled.
 import threading
 import time
 
-import pytest
 from PyQt6.QtCore import QEventLoop, QTimer
 
 from core.vol_runner import RUN_GATE, RunGate, RunSpec, VolatilityRunner

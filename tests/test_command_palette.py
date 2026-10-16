@@ -6,10 +6,7 @@ ribbon, so the ranking is load-bearing — a query that puts "Big Pools" above
 "Process List" for "psl" would make it useless.
 """
 
-import os
-import tempfile
 
-import pytest
 
 from ui.command_palette import Command, CommandPalette, score
 

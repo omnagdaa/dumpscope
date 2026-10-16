@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ui.theme import palette, readable, restyle
+from ui.theme import palette, plain, readable, restyle
 from core.insights import (
     FINDING_COLUMNS, SEVERITIES, SEVERITY_COLORS, Finding, analyse, counts,
 )
@@ -57,7 +57,7 @@ class FindingModel(QAbstractTableModel):
             return QColor(readable(
                 SEVERITY_COLORS.get(finding.severity, SEVERITY_COLORS["info"]), self.dark))
         if role == Qt.ItemDataRole.ToolTipRole:
-            return finding.detail
+            return plain(finding.detail)
         return None
 
 

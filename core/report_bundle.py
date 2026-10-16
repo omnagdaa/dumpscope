@@ -96,14 +96,39 @@ def _unique_dir(parent: str, name: str) -> str:
             candidate = os.path.join(parent, f"{name}-{n}")
 
 
-def _write_csv(path: str, header: list[str], rows) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_cell(value) -> str:
+    """
+    A value from the image, safe to open in a spreadsheet.
+
+    A command line such as ``=cmd|' /C calc'!A0`` is a live formula once the
+    CSV is opened in Excel. Prefixing a quote is the OWASP fix; plain numbers
+    such as ``-1`` are left alone. The database and report.json keep the
+    original value untouched.
+    """
+    text = "" if value is None else str(value)
+    if not text.startswith(_FORMULA_START):
+        return text
+    try:
+        float(text)
+        return text
+    except ValueError:
+        return "'" + text
+
+
+def write_csv(path: str, header: list[str], rows, delimiter: str = ",") -> None:
+    """Every CSV and TSV DumpScope writes goes through here."""
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
     # utf-8-sig so Excel opens non-ASCII process names correctly.
     with open(path, "w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(header)
+        writer = csv.writer(handle, delimiter=delimiter)
+        writer.writerow([csv_cell(c) for c in header])
         for row in rows:
-            writer.writerow(["" if c is None else str(c) for c in row])
+            writer.writerow([csv_cell(c) for c in row])
 
 
 def sha256_file(path: str, cancelled: Callable[[], bool] = lambda: False) -> str:
@@ -215,7 +240,7 @@ def _build(case, db, folder, options, result, report, stop):
         relative = os.path.join("analysis", name)
         columns = payload.get("columns") or []
         rows = [r for r in payload.get("rows") or [] if isinstance(r, (list, tuple))]
-        _write_csv(os.path.join(folder, relative), columns or ["value"], rows)
+        write_csv(os.path.join(folder, relative), columns or ["value"], rows)
         result_links[item["id"]] = relative
         files[relative] = f"{item['plugin']} run {item['id']}"
 
@@ -237,7 +262,7 @@ def _build(case, db, folder, options, result, report, stop):
             relative = os.path.join("timeline", f"{_safe(label, 'source')}.csv")
             while os.path.exists(os.path.join(folder, relative)):
                 relative = relative[:-4] + "_.csv"
-            _write_csv(os.path.join(folder, relative),
+            write_csv(os.path.join(folder, relative),
                        timeline_rules.EVENT_COLUMNS + ["Detail"],
                        (e.as_row() + [e.detail] for e in events))
             timelines.append((label, events))
@@ -251,19 +276,19 @@ def _build(case, db, folder, options, result, report, stop):
     insights_rel = ""
     if findings_all:
         insights_rel = "insights.csv"
-        _write_csv(os.path.join(folder, insights_rel), insight_rules.FINDING_COLUMNS,
+        write_csv(os.path.join(folder, insights_rel), insight_rules.FINDING_COLUMNS,
                    (f.as_row() for f in findings_all))
         files[insights_rel] = "Automatic triage findings"
 
     # ── Tables of record ─────────────────────────────────────────────────────
     _check(stop)
     report(40, "Writing bookmarks, extracted files and audit log…")
-    _write_csv(os.path.join(folder, "bookmarks.csv"),
+    write_csv(os.path.join(folder, "bookmarks.csv"),
                ["Label", "Tag", "Plugin", "Source", "Notes", "Detail", "Added"],
                ([b.get("label"), b.get("tag"), b.get("artifact_type"),
                  b.get("source_name"), b.get("notes"), b.get("description"),
                  b.get("created_at")] for b in bookmarks))
-    _write_csv(os.path.join(folder, "audit_log.csv"),
+    write_csv(os.path.join(folder, "audit_log.csv"),
                ["Timestamp", "Action", "Detail", "Examiner"],
                ([a.get("created_at"), a.get("action"), a.get("detail"),
                  a.get("examiner")] for a in audit))
@@ -275,7 +300,7 @@ def _build(case, db, folder, options, result, report, stop):
     if options.dump_mode != "none":
         _place_dumps(case, folder, extractions, options.dump_mode, result,
                      extraction_links, report, stop)
-    _write_csv(os.path.join(folder, "extracted_files.csv"),
+    write_csv(os.path.join(folder, "extracted_files.csv"),
                ["File in bundle", "Original path", "Contents", "PID", "Process",
                 "Plugin", "Size", "SHA-256 at extraction", "Extracted"],
                ([extraction_links.get(e["path"], ""), e["path"], e.get("kind"),
@@ -337,10 +362,17 @@ def _place_dumps(case, folder, extractions, mode, result, links, report, stop):
             sources.append((path, os.path.join("dumps", "external",
                                                _safe(os.path.basename(path), "file"))))
 
+    # A case folder can come from someone else. Only files that really live
+    # inside it are bundled: a forged extraction row, or a symlink planted in
+    # dumps/, must not copy ~/.ssh/id_rsa into a report the examiner sends out.
+    case_root = os.path.normcase(os.path.realpath(case.directory)) + os.sep
     for n, (path, relative) in enumerate(sources, start=1):
         _check(stop)
         report(42 + int(30 * n / max(len(sources), 1)),
                f"Adding dumps ({n}/{len(sources)})…")
+        if not os.path.normcase(os.path.realpath(path)).startswith(case_root):
+            result.warnings.append(f"Skipped {path}: it is outside the case folder.")
+            continue
         try:
             how = _place_file(path, os.path.join(folder, relative), mode)
         except OSError as exc:

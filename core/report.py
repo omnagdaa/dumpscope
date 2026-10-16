@@ -407,26 +407,6 @@ def build_json(case, sources, results, bookmarks, audit,
     return json.dumps(payload, indent=2, default=str)
 
 
-def write_report(path: str, case, sources, results, bookmarks, audit,
-                 fmt: str = "html", include_audit: bool = True,
-                 extractions: list[dict] | None = None,
-                 outputs: dict | None = None,
-                 max_rows: int = DEFAULT_MAX_ROWS) -> str:
-    """Write the report and return the path it landed at."""
-    content = (
-        build_json(case, sources, results, bookmarks, audit,
-                   extractions=extractions, outputs=outputs)
-        if fmt == "json"
-        else build_html(case, sources, results, bookmarks, audit, include_audit,
-                        extractions=extractions, outputs=outputs,
-                        max_rows=max_rows)
-    )
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(content)
-    return path
-
-
 # ── Summary, insights and timeline ────────────────────────────────────────────
 
 def _summary_block(sources, results, bookmarks, extractions, insights, timelines) -> str:

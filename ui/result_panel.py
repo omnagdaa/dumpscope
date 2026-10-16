@@ -4,7 +4,6 @@ The per-plugin results pane: a live table, a raw log, and the controls around th
 
 from __future__ import annotations
 
-import csv
 import json
 import os
 
@@ -17,6 +16,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from core.report_bundle import write_csv
 from ui import icons
 from ui.result_model import ResultFilterProxy, ResultTableModel
 from ui.theme import palette, restyle
@@ -340,12 +340,13 @@ class ResultPanel(QWidget):
         # runs a nested event loop and rows keep streaming in during it, so an
         # index captured beforehand can be pointing at a different line by the
         # time an action fires — which would silently tag the wrong evidence.
-        cell = str(index.data() or "")
         column = (self.model.columns[index.column()]
                   if index.column() < len(self.model.columns) else "")
         row = self.model.row_dict(self.proxy.mapToSource(index).row())
         if not row:
             return
+        # The stored value, not the painted one: the display is capped.
+        cell = str(row.get(column, ""))
 
         menu = QMenu(self)
         menu.addAction("Copy Cell", lambda: QApplication.clipboard().setText(cell))
@@ -514,11 +515,7 @@ class ResultPanel(QWidget):
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2)
             return
-        delimiter = "\t" if fmt == "tsv" else ","
-        with open(path, "w", encoding="utf-8", newline="") as fh:
-            writer = csv.writer(fh, delimiter=delimiter)
-            writer.writerow(columns)
-            writer.writerows(rows)
+        write_csv(path, columns, rows, delimiter="\t" if fmt == "tsv" else ",")
 
     # ── Persistence helpers ───────────────────────────────────────────────────
 
@@ -530,6 +527,3 @@ class ResultPanel(QWidget):
             "rows": [self.model.row_values(r) for r in range(self.model.rowCount())],
         }
 
-    @property
-    def log_text(self) -> str:
-        return "\n".join(self._log_lines)

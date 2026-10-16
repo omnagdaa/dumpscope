@@ -34,18 +34,6 @@ def _pump(predicate, timeout=30.0):
 
 # ── Timeline view ─────────────────────────────────────────────────────────────
 
-@pytest.fixture
-def timeline(qapp):
-    from ui.timeline_view import TimelineView
-    view = TimelineView()
-    view.resize(1200, 700)
-    view.show()
-    view.set_payloads(all_payloads(), missing=["windows.netscan.NetScan"])
-    QApplication.processEvents()
-    yield view
-    view.close()
-
-
 def test_timeline_empty_state(qapp):
     from ui.timeline_view import TimelineView
     view = TimelineView()

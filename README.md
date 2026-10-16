@@ -219,6 +219,36 @@ the report.
   opens as "could not be read" and is listed as a warning in reports. Case,
   settings and recent-case files are written atomically.
 
+### Security
+Everything in a memory image (process names, command lines, paths) can be
+chosen by an attacker, and a case folder can come from someone else.
+DumpScope treats both as hostile:
+
+- **No markup from the image.** Tooltips escape image text before Qt sees
+  it. Qt would otherwise render a process named `<img src="\\host\share\x">`
+  as HTML and fetch the file on hover, which on Windows leaks the examiner's
+  NTLM hash.
+- **No formulas in exports.** Every CSV and TSV goes through one writer that
+  defuses cells starting with `= + - @` (the OWASP rule; plain numbers are
+  kept). The database and `report.json` keep the original values.
+- **Reports cannot exfiltrate.** Only files that really lie inside the case
+  folder are bundled. A forged extraction record, or a symlink planted in
+  `dumps/`, cannot pull `~/.ssh` into a report.
+- **No code from the working directory.** volatility3 is started with
+  `python -P`, so a `volatility3/` package planted in the folder DumpScope was
+  launched from is never imported.
+- **Hostile files fail cleanly.** Deeply nested JSON in `case.json`, the
+  settings, the recent-case list or the database is rejected without a crash.
+  Over-long case names are shortened to fit the filesystem. Undecodable bytes
+  in vol3 output are replaced, not fatal.
+- **Huge values cannot freeze the window.** Cells are capped for display only;
+  copy, export, bookmarks and filtering use the full value.
+- **Private case folders.** On Linux and macOS they are created owner-only
+  (`0700`), since they hold password hashes and LSASS memory.
+- MD5 is used only as an evidence checksum (`usedforsecurity=False`), so
+  hashing works on FIPS-mode systems. Archive extraction rejects path
+  traversal. Subprocesses take argument lists, never a shell.
+
 ## Install
 
 Requires Python 3.12 or newer and [uv](https://docs.astral.sh/uv/)
@@ -340,7 +370,7 @@ and destroys the windows each test leaves behind. Running the suite never
 touches your real settings or recent-case list.
 
 ```bash
-uv run pytest                 # whole suite (about 555 tests, under a minute)
+uv run pytest                 # whole suite (about 560 tests, under a minute)
 uv run pytest -q tests/test_runner_crashes.py   # one file
 uv run pytest -k "gate or corrupt"              # by keyword
 ```
@@ -368,7 +398,7 @@ window through collect → timeline → insights → report against it.
 | Timeline/Insights/Report UI and the end-to-end window flow | `test_ui_analysis.py` |
 | Timeline range picker: quick ranges, absolute From/To, inverted ranges | `test_time_range.py` |
 | Tab overflow list, tab cycling, collapsible sidebar | `test_tab_overflow.py` |
-| Crash regressions found by fuzzing (unicode PIDs, unreadable results, huge fields) | `test_hardening.py` |
+| Crash and security regressions: fuzz-found crashes, tooltip injection, CSV formulas, report exfiltration, JSON bombs, cwd hijack, folder permissions | `test_hardening.py` |
 | Cases, database, reports, OS detection, settings | `test_case*.py`, `test_database.py`, `test_report*.py`, `test_os_detect.py`, `test_settings_and_notifications.py` |
 | Widgets: smoke construction, theme, ribbon, tabs, palette, result model | `test_ui_smoke.py`, `test_theme.py`, `test_plugin_ribbon.py`, `test_result_*.py`, `test_command_palette.py` |
 

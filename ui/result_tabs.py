@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
-from PyQt6.QtWidgets import QMenu, QPushButton, QTabBar, QTabWidget, QToolButton
+from PyQt6.QtWidgets import QMenu, QPushButton, QTabWidget, QToolButton
 
 from ui import icons
 

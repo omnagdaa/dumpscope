@@ -8,13 +8,12 @@ import logging
 import os
 import time
 
-from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QApplication, QColorDialog, QDockWidget, QFileDialog, QFontDialog,
-    QFrame, QGridLayout,
+    QGridLayout,
     QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
     QMessageBox,
     QPushButton, QScrollArea, QSplitter, QStatusBar, QTextEdit,
@@ -22,7 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core import settings
-from core.case import Case, remember_case
+from core.case import Case
 from core.database import Database
 from core.plugins import PluginRegistry, build_command_args
 from core.os_detect import ImageProbe, ImageProfile
@@ -1767,17 +1766,6 @@ class MainWindow(QMainWindow):
         self._refresh_case_tree()
         self._show_status(f"Bookmarked: {finding.title}")
 
-    def _latest_report(self) -> str:
-        """The most recently written report in the case, if there is one."""
-        folder = self.case.reports_dir if self.case.directory else ""
-        if not folder or not os.path.isdir(folder):
-            return ""
-        reports = [
-            os.path.join(folder, name) for name in os.listdir(folder)
-            if name.lower().endswith((".html", ".json"))
-        ]
-        return max(reports, key=os.path.getmtime, default="")
-
     def _close_case(self):
         """Return to the case manager without leaving the application."""
         if self._runners:
@@ -1970,6 +1958,8 @@ class MainWindow(QMainWindow):
     def _set_parallel_runs(self, count: int):
         self.settings = settings.save(max_parallel_runs=int(count))
         RUN_GATE.set_limit(count)
+        for action in self.parallel_group.actions():
+            action.setChecked(action.data() == count)
         self._show_status(
             "volatility3 runs will queue and run one at a time." if count == 1 else
             f"Up to {count} volatility3 runs may now run at once."

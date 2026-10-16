@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ui import icons
-from ui.theme import palette
+from ui.theme import palette, plain
 
 NODE_KIND = Qt.ItemDataRole.UserRole + 1
 NODE_NAME = Qt.ItemDataRole.UserRole + 2
@@ -166,7 +166,7 @@ class TagPanel(QWidget):
                 tooltip.append(finding["notes"])
             if finding.get("created_at"):
                 tooltip.append(f"Added {finding['created_at']}")
-            item.setToolTip(0, "\n".join(t for t in tooltip if t))
+            item.setToolTip(0, plain("\n".join(t for t in tooltip if t)))
 
     def _reselect(self, finding_id):
         """Keep the selection on the same finding across a refresh."""

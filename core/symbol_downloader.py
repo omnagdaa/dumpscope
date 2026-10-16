@@ -26,7 +26,6 @@ import subprocess
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from core.paths import cache_dir
 
 log = logging.getLogger("dumpscope.symbols")
 
@@ -62,18 +61,6 @@ def count_symbols(base_dir: str) -> int:
         for name in files
         if name.endswith(SYMBOL_EXTENSIONS)
     )
-
-
-def get_vol3_cache_dir() -> str:
-    """volatility3's own symbol cache, which it populates on automatic fetches."""
-    try:
-        from volatility3.framework import constants
-        for path in getattr(constants, "SYMBOL_BASEPATHS", ()):
-            if os.path.isdir(path):
-                return path
-    except Exception:
-        pass
-    return os.path.join(os.path.dirname(cache_dir()), "volatility3")
 
 
 class SymbolDownloader(QThread):
@@ -274,7 +261,7 @@ class SymbolFetcher(QThread):
                                "Microsoft's symbol server…")
             self._proc = subprocess.Popen(
                 self.command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, env=build_environment([symbols_dir]),
+                encoding="utf-8", errors="replace", env=build_environment([symbols_dir]),
                 creationflags=_creation_flags(),
             )
             try:

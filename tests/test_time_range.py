@@ -2,7 +2,6 @@
 from datetime import timedelta
 
 from core.timeline import parse_time
-from tests.test_ui_analysis import timeline  # noqa: F401  (fixture)
 from ui.timeline_view import quick_range, range_text
 
 FIRST = parse_time("2024-03-14 08:00:00")

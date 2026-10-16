@@ -6,9 +6,9 @@ from PyQt6.QtWidgets import (
     QTextEdit, QGroupBox, QGridLayout, QFrame, QProgressBar,
     QApplication, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import (
-    QDragEnterEvent, QDropEvent, QFont, QIcon, QPainter, QPalette, QColor,
+    QDragEnterEvent, QDropEvent, QPainter,
 )
 from PyQt6.QtWidgets import QStyle, QStyleOption
 from ui.theme import build as build_theme, restyle
@@ -530,9 +530,6 @@ class CaseWizard(QDialog):
     def get_case(self):
         """The Case created by this wizard; valid only after it was accepted."""
         return getattr(self, "_case", None)
-
-    def get_case_data(self):
-        return self._case_data
 
     def toggle_theme(self):
         self.is_dark = not self.is_dark

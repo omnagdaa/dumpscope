@@ -1,5 +1,4 @@
 """The launcher and the case-tree navigator."""
-import os
 
 import pytest
 

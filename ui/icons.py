@@ -17,8 +17,8 @@ unmapped emoji degrades to a neutral glyph rather than to a missing icon.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QByteArray, QSize, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import QByteArray, Qt
+from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
 
 # Every glyph is the inner markup of a 24x24 SVG. `stroke="currentColor"` is
@@ -112,10 +112,6 @@ _TEMPLATE = (
 )
 
 _cache: dict[tuple, QPixmap] = {}
-
-
-def glyph_names() -> list[str]:
-    return sorted(_GLYPHS)
 
 
 def for_emoji(emoji: str) -> str:
