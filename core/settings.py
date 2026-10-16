@@ -29,6 +29,7 @@ DEFAULTS = {
     # How many volatility3 processes may run at once. 1 serialises them, which
     # protects vol3's shared cache and keeps memory use predictable.
     "max_parallel_runs": 1,
+    "sidebar_visible": True,
 }
 
 # Bounds on numeric settings; anything outside is treated as invalid.
@@ -111,8 +112,11 @@ def save(**changes) -> dict:
     _cache = values
     try:
         os.makedirs(config_dir(), exist_ok=True)
-        with open(settings_file(), "w", encoding="utf-8") as handle:
+        # Atomic, like case.json: a crash mid-write must not leave half a file.
+        temporary = settings_file() + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
             json.dump(values, handle, indent=2)
+        os.replace(temporary, settings_file())
     except OSError as exc:
         log.warning("Could not write %s: %s", settings_file(), exc)
     return values

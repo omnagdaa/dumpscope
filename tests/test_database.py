@@ -93,6 +93,7 @@ def test_v1_migration_folds_duplicates_without_losing_data(tmp_path):
     conn.row_factory = sqlite3.Row
     results = conn.execute("SELECT plugin, case_id FROM analysis_results").fetchall()
     bookmarks = conn.execute("SELECT label, case_id FROM bookmarks").fetchall()
+    conn.close()
 
     assert len(results) == 3, "no result may be discarded"
     assert {r["case_id"] for r in results} == {1}

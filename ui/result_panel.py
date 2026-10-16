@@ -421,7 +421,7 @@ class ResultPanel(QWidget):
         """
         for name in ("PID", "Pid", "ProcessID", "Process ID", "OwnerPid"):
             value = str(row.get(name) or "").strip()
-            if value.isdigit() and int(value) > 0:
+            if value.isdecimal() and int(value) > 0:
                 return value
         return ""
 

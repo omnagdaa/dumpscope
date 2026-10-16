@@ -14,12 +14,12 @@ import html
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QPushButton, QSplitter, QStackedWidget, QTableView, QTextBrowser,
     QVBoxLayout, QWidget,
 )
 
-from ui.theme import palette
+from ui.theme import palette, readable, restyle
 from core.insights import (
     FINDING_COLUMNS, SEVERITIES, SEVERITY_COLORS, Finding, analyse, counts,
 )
@@ -29,6 +29,7 @@ class FindingModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.findings: list[Finding] = []
+        self.dark = True
 
     def set_findings(self, findings: list[Finding]):
         self.beginResetModel()
@@ -53,13 +54,15 @@ class FindingModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return finding.as_row()[index.column()]
         if role == Qt.ItemDataRole.ForegroundRole and index.column() == 0:
-            return QColor(SEVERITY_COLORS.get(finding.severity, SEVERITY_COLORS["info"]))
+            return QColor(readable(
+                SEVERITY_COLORS.get(finding.severity, SEVERITY_COLORS["info"]), self.dark))
         if role == Qt.ItemDataRole.ToolTipRole:
             return finding.detail
         return None
 
 
 class _SeverityCard(QFrame):
+    """A severity filter toggle: coloured dot, count, name. Click to filter."""
     clicked = pyqtSignal(str)
 
     def __init__(self, severity: str, parent=None):
@@ -67,20 +70,27 @@ class _SeverityCard(QFrame):
         self.severity = severity
         self.setObjectName("insightCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        color = SEVERITY_COLORS[severity]
-        self.setStyleSheet(f"QFrame#insightCard {{ border-left: 4px solid {color}; }}")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 8, 14, 8)
-        layout.setSpacing(0)
+        self.setToolTip(f"Show only {severity} findings")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 4, 12, 4)
+        layout.setSpacing(6)
+        # The severity colour is data, so it is the one inline colour here.
+        dot = QLabel("\u25cf")
+        dot.setStyleSheet(f"color: {SEVERITY_COLORS[severity]}; background: transparent;")
         self.count_lbl = QLabel("0")
         self.count_lbl.setObjectName("insightCount")
         label = QLabel(severity.title())
         label.setObjectName("insightLabel")
+        layout.addWidget(dot)
         layout.addWidget(self.count_lbl)
         layout.addWidget(label)
 
     def set_count(self, n: int):
         self.count_lbl.setText(f"{n:,}")
+
+    def set_selected(self, selected: bool):
+        self.setProperty("selected", selected)
+        restyle(self)
 
     def mousePressEvent(self, event):
         self.clicked.emit(self.severity)
@@ -121,11 +131,12 @@ class InsightsView(QWidget):
         self.collect_btn.setToolTip("Run the plugins the triage rules read that have "
                                     "not been run on this image yet.")
         self.collect_btn.clicked.connect(lambda: self.collect_requested.emit(list(self.missing)))
-        header.addWidget(self.collect_btn)
+        header.addWidget(self.collect_btn, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(header)
 
         cards = QHBoxLayout()
-        cards.setSpacing(10)
+        cards.setSpacing(6)
+        self._severity = ""
         self.cards = {}
         for severity in SEVERITIES:
             card = _SeverityCard(severity)
@@ -133,18 +144,13 @@ class InsightsView(QWidget):
             self.cards[severity] = card
             cards.addWidget(card)
         cards.addStretch()
-        self.severity_filter = QComboBox()
-        self.severity_filter.addItem("All severities", "")
-        for severity in SEVERITIES:
-            self.severity_filter.addItem(severity.title(), severity)
-        self.severity_filter.currentIndexChanged.connect(lambda _: self._apply())
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Filter findings…")
+        self.search.setPlaceholderText("Filter findings")
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(240)
+        self.search.setMinimumWidth(160)
+        self.search.setMaximumWidth(280)
         self.search.textChanged.connect(lambda _: self._apply())
-        cards.addWidget(self.severity_filter)
-        cards.addWidget(self.search)
+        cards.addWidget(self.search, 1)
         layout.addLayout(cards)
 
         self.stack = QStackedWidget()
@@ -213,6 +219,8 @@ class InsightsView(QWidget):
 
     def set_dark(self, dark: bool):
         self._dim = palette(dark)["text_dim"]
+        self.model.dark = dark
+        self.model.layoutChanged.emit()
         self._show_current()
 
     def set_payloads(self, payloads: list[dict], missing: list[str] | None = None):
@@ -224,14 +232,16 @@ class InsightsView(QWidget):
         tally = counts(findings)
         for severity, card in self.cards.items():
             card.set_count(tally.get(severity, 0))
+        # Nothing left to collect: the button goes rather than sitting there
+        # disabled, reading like an action that cannot be taken.
         self.collect_btn.setEnabled(bool(self.missing))
-        self.collect_btn.setText(
-            f"Collect Insight Data ({len(self.missing)})" if self.missing
-            else "Insight Data Collected")
+        self.collect_btn.setVisible(bool(self.missing))
+        self.collect_btn.setText(f"Collect Insight Data ({len(self.missing)})")
         if findings:
+            noun = "lead" if len(findings) == 1 else "leads"
             self.summary_lbl.setText(
-                f"{len(findings)} lead(s) from the stored output, most severe first. "
-                "These are starting points — check the evidence before relying on one.")
+                f"{len(findings)} {noun} from the stored output, most severe first. "
+                "Each is a starting point; confirm it against the evidence.")
         else:
             self.summary_lbl.setText(
                 "Nothing flagged in the output run so far." if not self.missing else
@@ -240,15 +250,16 @@ class InsightsView(QWidget):
         self._apply()
 
     def _filter_to(self, severity: str):
-        index = self.severity_filter.findData(severity)
-        self.severity_filter.setCurrentIndex(
-            0 if self.severity_filter.currentIndex() == index else index)
+        self._severity = "" if self._severity == severity else severity
+        for name, card in self.cards.items():
+            card.set_selected(name == self._severity)
+        self._apply()
 
     def visible_findings(self) -> list[Finding]:
         return list(self.model.findings)
 
     def _apply(self):
-        wanted = self.severity_filter.currentData() if hasattr(self, "severity_filter") else ""
+        wanted = getattr(self, "_severity", "")
         needle = self.search.text().strip().lower() if hasattr(self, "search") else ""
         shown = [
             f for f in self.findings
@@ -272,17 +283,19 @@ class InsightsView(QWidget):
         if finding is None:
             self.detail.setHtml("")
             return
-        color = SEVERITY_COLORS.get(finding.severity, SEVERITY_COLORS["info"])
+        color = readable(SEVERITY_COLORS.get(finding.severity, SEVERITY_COLORS["info"]),
+                         self.model.dark)
         dim = self._dim
         evidence = "".join(
             f"<tr><td style='padding-right:12px;color:{dim}'>{html.escape(k)}</td>"
             f"<td><code>{html.escape(v)}</code></td></tr>" for k, v in finding.evidence)
         self.detail.setHtml(
-            f"<p><b style='color:{color}'>{finding.severity.upper()}</b> · "
-            f"{html.escape(finding.category)}</p>"
+            f"<p><b style='color:{color}'>{finding.severity.title()}</b>"
+            f"<span style='color:{dim}'>&nbsp;&nbsp;{html.escape(finding.category)}</span></p>"
             f"<h3>{html.escape(finding.title)}</h3>"
             f"<p>{html.escape(finding.detail)}</p>"
-            + (f"<p>PID <b>{html.escape(finding.pid)}</b> · {html.escape(finding.process)}</p>"
+            + (f"<p>{html.escape(finding.process)} <span style='color:{dim}'>(PID "
+               f"{html.escape(finding.pid)})</span></p>"
                if finding.pid else "")
             + (f"<table>{evidence}</table>" if evidence else "")
             + f"<p style='color:{dim}'>From {html.escape(finding.plugin)}</p>")

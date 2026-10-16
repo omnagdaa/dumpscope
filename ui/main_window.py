@@ -205,6 +205,7 @@ class MainWindow(QMainWindow):
         # The OS badge lives in the sidebar, so the sidebar has to exist before
         # anything sets an OS.
         self._build_case_dock()
+        self._install_sidebar_toggle()
         # Something has to be on the ribbon before the probe reports, and the
         # probe cannot report at all until an image is loaded.
         self.set_os(DEFAULT_OS, quiet=True)
@@ -264,6 +265,9 @@ class MainWindow(QMainWindow):
             column.addStretch(1)
         else:
             self.case_tree = CaseTree()
+            self.case_tree.plugin_name = lambda plugin_id: (
+                self.registry.get(plugin_id).short_name if self.registry.get(plugin_id)
+                else plugin_id.rsplit(".", 1)[-1])
             self.case_tree.source_activated.connect(self._activate_source)
             self.case_tree.source_remove.connect(self._remove_source)
             self.case_tree.source_hash.connect(self._hash_source)
@@ -302,6 +306,9 @@ class MainWindow(QMainWindow):
         dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            # Closable is what enables the dock's toggle action (Ctrl+B); the
+            # title bar is hidden, so it adds no close button of its own.
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
         # The dock's own title bar would repeat what the case header already
         # says, one line above it.
@@ -310,6 +317,24 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         dock.setMinimumWidth(248)
         self._refresh_case_tree()
+
+    def _install_sidebar_toggle(self):
+        """
+        Ctrl+B, View > Sidebar and the ribbon's sidebar button all hide and
+        show the case dock. Qt's own toggle action is used so the three can
+        never disagree with the dock, including after it is floated and closed.
+        The choice is remembered: an examiner who works full width keeps it.
+        """
+        action = self.case_dock.toggleViewAction()
+        action.setText("Sidebar")
+        action.setShortcut("Ctrl+B")
+        self.sidebar_action = action
+        self.view_menu.insertAction(self.view_menu.actions()[0], action)
+        self.view_menu.insertSeparator(self.view_menu.actions()[1])
+        self.ribbon.sidebar_btn.clicked.connect(action.trigger)
+        self.case_dock.setVisible(bool(self.settings.get("sidebar_visible", True)))
+        action.toggled.connect(
+            lambda shown: setattr(self, "settings", settings.save(sidebar_visible=shown)))
 
     def _refresh_case_tree(self):
         if getattr(self, "case_tree", None) is None or self.db is None:
@@ -441,7 +466,8 @@ class MainWindow(QMainWindow):
 
         index = self.tabs.add_result_tab(panel, f"{short} (saved)")
         self.tabs.setCurrentIndex(index)
-        self._show_status(f"Opened stored {short} — {len(stored['rows']):,} rows.")
+        n = len(stored["rows"])
+        self._show_status(f"Opened stored {short}: {n:,} {'row' if n == 1 else 'rows'}.")
 
     def _delete_stored_result(self, result_id: int):
         answer = QMessageBox.question(
@@ -518,6 +544,7 @@ class MainWindow(QMainWindow):
         file_menu.insertSeparator(file_menu.actions()[1])
 
         view_menu = bar.addMenu("&View")
+        self.view_menu = view_menu
         theme_action = QAction("Toggle Theme", self)
         theme_action.setShortcut("Ctrl+T")
         theme_action.triggered.connect(self.toggle_theme)
@@ -872,9 +899,9 @@ class MainWindow(QMainWindow):
         for index, (label, value) in enumerate(facts):
             row, column = divmod(index, 2)
             name = QLabel(label)
-            name.setObjectName("statTitle")
+            name.setObjectName("fieldLabel")
             field = QLabel(str(value))
-            field.setObjectName("fieldLabel")
+            field.setObjectName("fieldValue")
             field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             field.setWordWrap(True)
             grid.addWidget(name, row, column * 2)
@@ -1161,7 +1188,7 @@ class MainWindow(QMainWindow):
         if cancelled:
             self._show_status(f"{short} cancelled.")
         elif exit_code == 0:
-            self._show_status(f"{short} finished — {rows:,} rows.")
+            self._show_status(f"{short} finished: {rows:,} {'row' if rows == 1 else 'rows'}.")
             # Inside a batch (Collect, credential sweep, several clicks) each
             # success would stack a toast over the work; the batch is announced
             # once when it ends. Failures are always announced.

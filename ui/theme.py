@@ -27,67 +27,75 @@ from string import Template
 # The accent ramp matches the plugin category colours in core.plugins, so the
 # ribbon and the chrome around it belong to the same palette.
 
-# "Islands": a warm graphite ground with a sea-green accent. The previous dark
-# palette was GitHub's, which tints every surface blue; on a tool whose own
-# output is mostly blue-highlighted rows, that left nothing quiet to read
-# against.
+# Chrome is neutral graphite; hue is reserved for what carries meaning —
+# severity, tags, event types, plugin categories — so any colour on screen
+# says something about the evidence. The one accent is a steel blue for focus,
+# selection and the primary action, the convention examiners already read in
+# every other tool on their desk. Text pairs meet WCAG AA (4.5:1).
 DARK = {
-    "bg":            "#15181a",
-    "surface":       "#1b1f21",
-    "surface_alt":   "#212628",
-    "surface_high":  "#272d2f",
-    "border":        "#323a3c",
-    "border_strong": "#47514f",
-    "text":          "#dee4e0",
-    "text_dim":      "#95a09b",
-    "text_faint":    "#6d7772",
-    "accent":        "#7fbfa6",
-    "accent_hover":  "#9bd6bd",
-    "accent_soft":   "#18302a",
-    # The accent is a light green, so text printed on it has to be dark.
-    "on_accent":     "#0f201b",
-    "ok":            "#8fbf7f",
-    "ok_soft":       "#1b2a1a",
-    "warn":          "#dfb06a",
-    "warn_soft":     "#2e2617",
-    "danger":        "#e0796f",
-    "danger_hover":  "#f0938a",
-    "danger_soft":   "#301c1a",
-    "select":        "#2e5f52",
-    "on_select":     "#eaf3ee",
-    "shadow":        "#0a0d0e",
+    "bg":            "#1d1e21",
+    "surface":       "#232428",
+    "surface_alt":   "#27292d",
+    "surface_high":  "#2e3035",
+    "border":        "#36393f",
+    "border_strong": "#4b4f57",
+    "text":          "#dfe1e5",
+    "text_dim":      "#a2a8b0",
+    "text_faint":    "#80868f",
+    "accent":        "#5b9be0",
+    "accent_hover":  "#78aee8",
+    "accent_soft":   "#1f3047",
+    # The accent is light enough to read as text on the dark ground, so text
+    # printed on it has to be dark.
+    "on_accent":     "#0b1626",
+    "ok":            "#79b47f",
+    "ok_soft":       "#1d2b20",
+    "warn":          "#e0b05a",
+    "warn_soft":     "#2f2817",
+    "danger":        "#ec7a72",
+    "danger_hover":  "#f2968f",
+    "danger_soft":   "#33201f",
+    "select":        "#2d4a6e",
+    "on_select":     "#f2f5f8",
+    "shadow":        "#0b0c0e",
 }
 
 LIGHT = {
-    "bg":            "#f3f5f1",
+    "bg":            "#f3f4f6",
     "surface":       "#ffffff",
-    "surface_alt":   "#ebeee8",
-    "surface_high":  "#e2e6df",
-    "border":        "#d2d7cd",
-    "border_strong": "#aeb5ab",
-    "text":          "#1d2422",
-    "text_dim":      "#556058",
-    "text_faint":    "#7b857e",
-    "accent":        "#2c7a61",
-    "accent_hover":  "#20604b",
-    "accent_soft":   "#dcefe6",
+    "surface_alt":   "#f6f7f9",
+    "surface_high":  "#e9ebee",
+    "border":        "#d6d9de",
+    "border_strong": "#b3b8bf",
+    "text":          "#1d2025",
+    "text_dim":      "#4f5660",
+    "text_faint":    "#666d77",
+    "accent":        "#1f5fae",
+    "accent_hover":  "#184c8c",
+    "accent_soft":   "#e1ebf8",
     "on_accent":     "#ffffff",
-    "ok":            "#2f7d3f",
-    "ok_soft":       "#dcf2dd",
-    "warn":          "#8a6410",
-    "warn_soft":     "#faf0d2",
-    "danger":        "#b4342c",
-    "danger_hover":  "#8d251f",
-    "danger_soft":   "#fbe3e0",
-    "select":        "#2c7a61",
-    "on_select":     "#ffffff",
-    "shadow":        "#a8b0a7",
+    "ok":            "#2c7a36",
+    "ok_soft":       "#e0f1e2",
+    "warn":          "#8a5d00",
+    "warn_soft":     "#faf0d8",
+    "danger":        "#b8322b",
+    "danger_hover":  "#932720",
+    "danger_soft":   "#fbe4e2",
+    # Soft selection with dark text, as in Explorer and Finder: a saturated
+    # bar across a dense table is louder than the row it marks.
+    "select":        "#d3e3f8",
+    "on_select":     "#11161d",
+    "shadow":        "#b3b8bf",
 }
 
 
 _FONTS = {
-    "ui_font":   "'Inter', 'Segoe UI', 'Ubuntu', 'Cantarell', sans-serif",
-    "mono_font": "'JetBrains Mono', 'Cascadia Mono', 'Consolas', 'DejaVu Sans Mono', monospace",
+    # Each platform's own interface face first, so the app sits beside the
+    # examiner's other tools rather than looking like a web page.
+    "ui_font":   "'Segoe UI Variable Text', 'Segoe UI', 'IBM Plex Sans', '.AppleSystemUIFont', "
+                 "'Noto Sans', 'Cantarell', sans-serif",
+    "mono_font": "'Cascadia Mono', 'JetBrains Mono', 'IBM Plex Mono', 'Consolas', 'Menlo', "
+                 "'DejaVu Sans Mono', monospace",
 }
 
 # The examiner's choices, if any. A chosen family is put in front of the stack
@@ -126,7 +134,7 @@ QToolTip {
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox {
     background-color: $surface;
     border: 1px solid $border;
-    border-radius: 6px;
+    border-radius: 4px;
     padding: 6px 10px;
     color: $text;
     selection-background-color: $select;
@@ -155,10 +163,9 @@ QPlainTextEdit#outputWindow {
 QPushButton {
     background-color: $surface_high;
     border: 1px solid $border;
-    border-radius: 6px;
-    padding: 6px 14px;
+    border-radius: 4px;
+    padding: 5px 14px;
     color: $text;
-    font-weight: 600;
 }
 QPushButton:hover { background-color: $surface_alt; border-color: $border_strong; }
 QPushButton:pressed { background-color: $surface; }
@@ -168,6 +175,7 @@ QPushButton:disabled {
     border-color: $border;
 }
 QPushButton#primaryBtn, QPushButton#primaryButton {
+    font-weight: 600;
     background-color: $accent;
     border-color: $accent;
     color: $on_accent;
@@ -227,19 +235,19 @@ QRadioButton::indicator:checked {
 /* ── Group boxes ───────────────────────────────────────────────────────── */
 QGroupBox {
     border: 1px solid $border;
-    border-radius: 8px;
+    border-radius: 4px;
     margin-top: 14px;
     padding: 14px 12px 12px 12px;
-    font-weight: 700;
-    font-size: 11px;
-    color: $text_dim;
+    font-weight: 600;
+    font-size: 12px;
+    color: $text;
     background-color: $surface;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
-    left: 12px;
-    padding: 0 6px;
-    color: $text_dim;
+    left: 8px;
+    padding: 0 4px;
+    color: $text;
 }
 
 /* ── Scrollbars ────────────────────────────────────────────────────────── */
@@ -274,13 +282,31 @@ QTabBar::tab {
     background-color: transparent;
     border: none;
     border-bottom: 2px solid transparent;
-    padding: 7px 16px;
+    padding: 7px 14px;
     margin: 0;
     color: $text_dim;
-    font-weight: 600;
 }
 QTabBar::tab:selected { color: $text; border-bottom-color: $accent; }
 QTabBar::tab:hover:!selected { color: $text; background-color: $surface_alt; }
+/* Many tabs: cap each one so more fit, and make the overflow controls
+   targets a pointer can actually hit. */
+QTabBar::tab { max-width: 220px; }
+QTabBar QToolButton {
+    background-color: $surface;
+    border: none;
+    border-left: 1px solid $border;
+    width: 22px;
+}
+QTabBar QToolButton:hover { background-color: $surface_high; }
+QToolButton#tabListButton {
+    background-color: transparent;
+    border: none;
+    border-left: 1px solid $border;
+    padding: 4px 10px;
+    color: $text_dim;
+}
+QToolButton#tabListButton:hover { background-color: $surface_high; color: $text; }
+QToolButton#tabListButton::menu-indicator { image: none; width: 0; }
 QPushButton#tabCloseButton {
     border: none;
     background: transparent;
@@ -326,8 +352,8 @@ QHeaderView::section {
     border-bottom: 1px solid $border;
     padding: 5px 8px;
     color: $text_dim;
-    font-weight: 700;
-    font-size: 11px;
+    font-weight: 600;
+    font-size: 12px;
 }
 QHeaderView::section:hover { background-color: $surface_alt; color: $text; }
 QTableView QTableCornerButton::section {
@@ -339,7 +365,7 @@ QTableView QTableCornerButton::section {
 QComboBox {
     background-color: $surface;
     border: 1px solid $border;
-    border-radius: 6px;
+    border-radius: 4px;
     padding: 5px 10px;
     color: $text;
 }
@@ -361,7 +387,7 @@ QMenuBar::item:selected { background-color: $surface_high; }
 QMenu {
     background-color: $surface;
     border: 1px solid $border;
-    border-radius: 6px;
+    border-radius: 4px;
     padding: 4px;
     color: $text;
 }
@@ -389,7 +415,7 @@ QDockWidget::title {
     padding: 7px 12px;
     border-bottom: 1px solid $border;
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
 }
 QWidget#caseTree, QWidget#tagPanel { background-color: $surface; }
 QTreeWidget#caseTree, QTreeWidget#tagTree { background-color: $surface; }
@@ -401,9 +427,8 @@ QWidget#dockHeader {
     border-bottom: 1px solid $border;
 }
 QLabel#dockHeading {
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 1.2px;
+    font-size: 12px;
+    font-weight: 600;
     color: $text_faint;
 }
 QPushButton#iconButton {
@@ -413,7 +438,7 @@ QPushButton#iconButton {
     padding: 0;
     color: $text_dim;
     font-size: 15px;
-    font-weight: 700;
+    font-weight: 600;
 }
 QPushButton#iconButton:hover { background-color: $surface_alt; color: $accent; }
 
@@ -428,7 +453,7 @@ QWidget#caseHeader {
 }
 QLabel#caseTag, QLabel#caseNameLabel {
     font-size: 13px;
-    font-weight: 700;
+    font-weight: 600;
     color: $text;
 }
 QLabel#imageLabel { font-size: 12px; color: $text_dim; }
@@ -441,7 +466,7 @@ QLabel#osBadge {
     border-radius: 4px;
     padding: 3px 9px 3px 5px;
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
     background-color: $surface_high;
     color: $text_dim;
 }
@@ -460,14 +485,14 @@ QWidget#toast {
     background-color: $surface_high;
     border: 1px solid $border;
     border-left: 3px solid $accent;
-    border-radius: 6px;
+    border-radius: 4px;
 }
 QWidget#toast[level="success"] { border-left-color: $ok; }
 QWidget#toast[level="warning"] { border-left-color: $warn; }
 QWidget#toast[level="error"]   { border-left-color: $danger; }
 QLabel#toastTitle {
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 600;
     color: $text;
     background: transparent;
 }
@@ -478,7 +503,7 @@ QLabel#toastGlyph { background: transparent; }
 QDialog#commandPalette {
     background-color: $surface;
     border: 1px solid $border_strong;
-    border-radius: 8px;
+    border-radius: 4px;
 }
 QLineEdit#paletteInput {
     background-color: transparent;
@@ -509,39 +534,40 @@ QWidget#pluginRibbon {
 QWidget#ribbonInner, QWidget#ribbonGroup, QWidget#ribbonTiles { background: transparent; }
 QFrame#ribbonDivider { color: $border; background-color: $border; border: none; }
 QLabel#ribbonHeading {
-    font-size: 9px;
-    font-weight: 800;
-    letter-spacing: 1.4px;
+    font-size: 11px;
+    font-weight: 600;
     color: $text_faint;
 }
 QLineEdit#pluginSearch {
     background-color: $surface;
     border: 1px solid $border;
-    border-radius: 13px;
-    padding: 4px 12px;
+    border-radius: 4px;
+    padding: 3px 8px;
     font-size: 12px;
 }
+/* Overflow is reached by wheel or search; the bar is a hint, not a control. */
+QScrollArea#ribbonScroll QScrollBar:horizontal { height: 4px; }
+QScrollArea#ribbonScroll QScrollBar::handle:horizontal { border-radius: 2px; }
 QLabel#ribbonEmpty { color: $text_faint; font-style: italic; font-size: 12px; }
 
 /* Tiles. The plugin's category colour is applied as a border/text accent by
    PluginButton via a dynamic property, which the theme reads back here. */
 PluginButton {
-    background-color: $surface;
-    border: 1px solid $border;
-    border-radius: 8px;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
 }
-PluginButton:hover { background-color: $surface_high; border-color: $border_strong; }
+PluginButton:hover { background-color: $surface_high; border-color: $border; }
 PluginButton[state="running"] {
     background-color: $accent_soft;
     border-color: $accent;
 }
-PluginButton[state="disabled"] { background-color: $bg; border-color: $border; }
-QLabel#pluginButtonLabel { font-size: 10px; font-weight: 600; color: $text; }
+PluginButton[state="disabled"] { background-color: transparent; }
+QLabel#pluginButtonLabel { font-size: 11px; color: $text; }
 QLabel#pluginButtonIcon { font-size: 22px; }
 QLabel#pluginButtonBadge {
     font-size: 8px;
-    font-weight: 800;
-    letter-spacing: 0.4px;
+    font-weight: 600;
     color: $text_faint;
 }
 PluginButton[state="running"] QLabel#pluginButtonBadge { color: $accent; }
@@ -551,11 +577,11 @@ QWidget#resultToolbar {
     background-color: $surface;
     border-bottom: 1px solid $border;
 }
-QLabel#panelTitle { font-size: 13px; font-weight: 700; color: $text; }
+QLabel#panelTitle { font-size: 13px; font-weight: 600; color: $text; }
 QLabel#panelStage { font-size: 11px; color: $text_faint; }
 QLabel#panelRowCount {
     font-size: 11px;
-    font-weight: 700;
+    font-weight: 600;
     color: $text_dim;
     font-family: $mono_font;
 }
@@ -566,24 +592,23 @@ QLabel#statusDot[state="error"]     { color: $danger; }
 QLabel#statusDot[state="cancelled"] { color: $warn; }
 
 /* ── Overview tab ──────────────────────────────────────────────────────── */
-QLabel#overviewTitle { font-size: 20px; font-weight: 800; color: $text; }
+QLabel#overviewTitle { font-size: 18px; font-weight: 600; color: $text; }
 QLabel#overviewBlurb { font-size: 12px; color: $text_dim; }
 QWidget#statCard {
     background-color: $surface_alt;
     border: 1px solid $border;
-    border-radius: 8px;
+    border-radius: 4px;
     padding: 4px;
 }
 QLabel#statValue {
     font-size: 17px;
-    font-weight: 700;
+    font-weight: 600;
     color: $text;
     font-family: $mono_font;
 }
 QLabel#statTitle {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.8px;
+    font-size: 11px;
+    font-weight: 600;
     color: $text_faint;
 }
 
@@ -592,31 +617,30 @@ QWidget#launcherSidebar {
     background-color: $surface;
     border-right: 1px solid $border;
 }
-QLabel#launcherLogo { font-size: 24px; font-weight: 800; color: $accent; }
+QLabel#launcherLogo { font-size: 20px; font-weight: 600; color: $text; }
 QLabel#launcherTagline { font-size: 12px; color: $text_dim; }
 QLabel#launcherHint { font-size: 11px; color: $text_faint; }
 QLabel#launcherHeading {
-    font-size: 11px;
-    font-weight: 800;
-    letter-spacing: 1.2px;
+    font-size: 13px;
+    font-weight: 600;
     color: $text_faint;
 }
 QFrame#launcherDivider { background-color: $border; border: none; }
 QFrame#launcherEmpty {
     border: 1px dashed $border;
-    border-radius: 10px;
+    border-radius: 4px;
 }
-QLabel#launcherEmptyTitle { font-size: 16px; font-weight: 700; color: $text; }
+QLabel#launcherEmptyTitle { font-size: 16px; font-weight: 600; color: $text; }
 QLabel#launcherEmptyText { font-size: 12px; color: $text_dim; }
 QListWidget#recentList {
     background-color: transparent;
     border: 1px solid $border;
-    border-radius: 8px;
+    border-radius: 4px;
     padding: 4px;
 }
 QListWidget#recentList::item {
     padding: 8px 10px;
-    border-radius: 6px;
+    border-radius: 4px;
     color: $text;
 }
 QListWidget#recentList::item:selected { background-color: $select; color: $on_select; }
@@ -625,26 +649,49 @@ QListWidget#recentList::item:selected { background-color: $select; color: $on_se
 QPushButton#timelineChip {
     padding: 4px 10px;
     font-size: 11px;
-    border-radius: 6px;
+    border-radius: 4px;
     background-color: $surface_alt;
     color: $text_faint;
 }
 QPushButton#timelineChip:checked { background-color: $surface_high; color: $text; }
-QFrame#insightCard {
+QFrame#timeRangePopup {
+    background-color: $surface;
+    border: 1px solid $border_strong;
+    border-radius: 4px;
+}
+QLabel#popupHeading { font-size: 13px; font-weight: 600; color: $text; }
+QPushButton#quickRange {
+    background: transparent;
+    border: none;
+    color: $accent;
+    text-align: left;
+    padding: 4px 6px;
+}
+QPushButton#quickRange:hover { background-color: $accent_soft; }
+QDateTimeEdit {
     background-color: $surface;
     border: 1px solid $border;
-    border-radius: 8px;
-    min-width: 96px;
+    border-radius: 4px;
+    padding: 4px 8px;
+    color: $text;
 }
-QLabel#insightCount { font-size: 22px; font-weight: 800; color: $text; background: transparent; }
-QLabel#insightLabel {
-    font-size: 10px; font-weight: 700; letter-spacing: 1px;
-    color: $text_faint; background: transparent;
+QDateTimeEdit:focus { border-color: $accent; }
+QCalendarWidget QWidget { alternate-background-color: $surface_alt; }
+QCalendarWidget QToolButton { background: transparent; border: none; color: $text; padding: 4px 8px; }
+QCalendarWidget QAbstractItemView:disabled { color: $text_faint; }
+QFrame#insightCard {
+    background-color: transparent;
+    border: 1px solid $border;
+    border-radius: 4px;
 }
+QFrame#insightCard:hover { background-color: $surface_high; }
+QFrame#insightCard[selected="true"] { background-color: $accent_soft; border-color: $accent; }
+QLabel#insightCount { font-size: 13px; font-weight: 600; color: $text; background: transparent; }
+QLabel#insightLabel { font-size: 13px; color: $text_dim; background: transparent; }
 QLabel#reportOption { font-size: 12px; color: $text_dim; }
 
 /* ── Dialogs and wizard ────────────────────────────────────────────────── */
-QLabel#dialogHeading { font-size: 16px; font-weight: 700; color: $text; }
+QLabel#dialogHeading { font-size: 16px; font-weight: 600; color: $text; }
 QLabel#dialogBlurb { font-size: 12px; color: $text_dim; }
 QWidget#wizardHeader {
     background-color: $surface;
@@ -657,11 +704,11 @@ QWidget#wizardFooter {
 QWidget#stepContainer { background: transparent; }
 QFrame#stepLine { background-color: $border; border: none; }
 QLabel#stepLabel { font-size: 11px; color: $text_faint; }
-QLabel#stepLabel[state="active"] { color: $accent; font-weight: 700; }
+QLabel#stepLabel[state="active"] { color: $accent; font-weight: 600; }
 QLabel#stepLabel[state="done"] { color: $ok; }
 QLabel#stepCircle {
     border-radius: 13px;
-    font-weight: 800;
+    font-weight: 600;
     font-size: 12px;
     background-color: $surface_high;
     color: $text_faint;
@@ -677,9 +724,10 @@ QLabel#stepCircle[state="done"] {
     color: $on_accent;
     border-color: $ok;
 }
-QLabel#wizardTitle { font-size: 18px; font-weight: 800; color: $text; }
+QLabel#wizardTitle { font-size: 18px; font-weight: 600; color: $text; }
 QLabel#wizardSubtitle { font-size: 12px; color: $text_dim; }
-QLabel#fieldLabel { font-size: 12px; font-weight: 600; color: $text; }
+QLabel#fieldLabel { font-size: 13px; color: $text_dim; }
+QLabel#fieldValue { font-size: 13px; color: $text; }
 QLabel#fieldHint { font-size: 11px; color: $text_dim; }
 QLabel#requiredNote { font-size: 11px; color: $danger; }
 QLabel#hintOk { color: $ok; font-size: 12px; }
@@ -689,15 +737,15 @@ QLabel#hintError { color: $danger; font-size: 12px; }
 /* The wizard's drop zone: one rule per state rather than three inline sheets. */
 QWidget#dropZone {
     border: 2px dashed $border_strong;
-    border-radius: 12px;
+    border-radius: 4px;
     background-color: $surface;
 }
 QWidget#dropZone[state="hover"] { border-color: $accent; background-color: $accent_soft; }
 QWidget#dropZone[state="loaded"] { border-style: solid; border-color: $ok; background-color: $ok_soft; }
-QLabel#dropIcon { font-size: 38px; }
-QLabel#dropTitle { font-size: 14px; font-weight: 700; color: $text; }
+QLabel#dropIcon { font-size: 32px; }
+QLabel#dropTitle { font-size: 14px; font-weight: 600; color: $text; }
 QLabel#dropSubtitle { font-size: 11px; color: $text_dim; }
-QLabel#dropFile { font-size: 12px; font-weight: 700; color: $ok; }
+QLabel#dropFile { font-size: 12px; font-weight: 600; color: $ok; }
 """)
 
 
@@ -724,7 +772,12 @@ def fonts() -> dict:
 
 def mono_family() -> str:
     """The monospace family to hand a QFont, for the places QSS cannot reach."""
-    return _OVERRIDES["mono_font"] or "JetBrains Mono"
+    if _OVERRIDES["mono_font"]:
+        return _OVERRIDES["mono_font"]
+    from PyQt6.QtGui import QFontDatabase
+    installed = set(QFontDatabase.families())
+    stack = [f.strip().strip("'") for f in _FONTS["mono_font"].split(",")]
+    return next((f for f in stack if f in installed), "monospace")
 
 
 def _stack(key: str) -> str:
@@ -754,6 +807,31 @@ def build(dark: bool = True) -> str:
 def palette(dark: bool = True) -> dict:
     """The raw tokens, for the rare place that needs a colour in Python."""
     return dict(DARK if dark else LIGHT)
+
+
+def _luminance(hex_color: str) -> float:
+    channels = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    r, g, b = (c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def readable(color: str, dark: bool = True) -> str:
+    """
+    A data colour (severity, event type) adjusted to be legible as text.
+
+    Those colours are tuned for the dark ground. On the light one they are
+    darkened, keeping their hue, until they reach WCAG AA (4.5:1) against it.
+    """
+    if dark or not color.startswith("#") or len(color) != 7:
+        return color
+    from PyQt6.QtGui import QColor
+    ground = _luminance(LIGHT["surface"])
+    hue, sat, light, _ = QColor(color).getHsl()
+    adjusted = color
+    while light > 0 and (ground + 0.05) / (_luminance(adjusted) + 0.05) < 4.5:
+        light = max(0, light - 6)
+        adjusted = QColor.fromHsl(hue, sat, light).name()
+    return adjusted
 
 
 def restyle(widget) -> None:

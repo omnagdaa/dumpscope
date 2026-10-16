@@ -12,23 +12,25 @@ types from the legend.
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from PyQt6.QtCore import (
-    QAbstractTableModel, QModelIndex, QPointF, QRectF, Qt, pyqtSignal,
+    QAbstractTableModel, QDateTime, QModelIndex, QPointF, QRectF, Qt, QTimeZone,
+    pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QPushButton, QSplitter, QStackedWidget, QTableView, QToolTip,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QDateTimeEdit, QFileDialog, QFormLayout, QFrame,
+    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
+    QSplitter, QStackedWidget, QTableView, QToolTip, QVBoxLayout, QWidget,
 )
 
 from core.timeline import (
     EVENT_COLUMNS, KIND_COLORS, KIND_LABELS, KINDS, Event, build_events,
     filter_events, format_time, histogram,
 )
-from ui.theme import palette
+from ui import icons
+from ui.theme import palette, readable
 
 
 def _tick_label(moment: datetime, span: timedelta) -> str:
@@ -39,6 +41,167 @@ def _tick_label(moment: datetime, span: timedelta) -> str:
     if span <= timedelta(days=60):
         return moment.strftime("%b %d %H:%M")
     return moment.strftime("%Y-%m-%d")
+
+
+# ── Time range picker ─────────────────────────────────────────────────────────
+# Relative ranges are anchored to the capture, not to the clock: an image
+# acquired last month has nothing in "the last 15 minutes" of today, but the
+# minutes before acquisition are usually exactly what an examiner wants.
+
+QUICK_RANGES: tuple[tuple[str, str, timedelta | None], ...] = (
+    ("Last 5 minutes",   "last",  timedelta(minutes=5)),
+    ("First 5 minutes",  "first", timedelta(minutes=5)),
+    ("Last 15 minutes",  "last",  timedelta(minutes=15)),
+    ("First 15 minutes", "first", timedelta(minutes=15)),
+    ("Last hour",        "last",  timedelta(hours=1)),
+    ("First hour",       "first", timedelta(hours=1)),
+    ("Last 24 hours",    "last",  timedelta(days=1)),
+    ("Whole capture",    "all",   None),
+)
+
+
+def quick_range(first: datetime, last: datetime, anchor: str,
+                span: timedelta | None) -> tuple[datetime | None, datetime | None]:
+    """The (start, end) a quick range selects; (None, None) is everything."""
+    if anchor == "last" and span is not None:
+        return max(first, last - span), last
+    if anchor == "first" and span is not None:
+        return first, min(last, first + span)
+    return None, None
+
+
+def range_text(start: datetime | None, end: datetime | None) -> str:
+    """The range as the picker button shows it."""
+    if start is None or end is None:
+        return "Whole capture"
+    full = "%Y-%m-%d %H:%M:%S"
+    tail = end.strftime("%H:%M:%S" if start.date() == end.date() else full)
+    return f"{start.strftime(full)} – {tail} UTC"
+
+
+def _to_qt(moment: datetime) -> QDateTime:
+    return QDateTime.fromMSecsSinceEpoch(int(moment.timestamp() * 1000), QTimeZone.utc())
+
+
+def _from_qt(value: QDateTime) -> datetime:
+    return datetime.fromtimestamp(value.toMSecsSinceEpoch() / 1000, timezone.utc)
+
+
+class TimeRangePopup(QFrame):
+    """Quick ranges and an absolute From/To with calendars, as in Kibana."""
+
+    chosen = pyqtSignal(object, object)          # start, end; None, None = all
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setObjectName("timeRangePopup")
+        self._first = self._last = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        quick = QLabel("Quick select")
+        quick.setObjectName("popupHeading")
+        hint = QLabel("Relative to the first or last event in this image.")
+        hint.setObjectName("fieldHint")
+        layout.addWidget(quick)
+        layout.addWidget(hint)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(2)
+        self.quick_buttons: dict[str, QPushButton] = {}
+        for n, (label, anchor, span) in enumerate(QUICK_RANGES):
+            button = QPushButton(label)
+            button.setObjectName("quickRange")
+            button.clicked.connect(lambda _=False, a=anchor, s=span: self._quick(a, s))
+            grid.addWidget(button, n // 2, n % 2)
+            self.quick_buttons[label] = button
+        layout.addLayout(grid)
+
+        rule = QFrame()
+        rule.setObjectName("launcherDivider")
+        rule.setFixedHeight(1)
+        layout.addSpacing(4)
+        layout.addWidget(rule)
+        layout.addSpacing(4)
+        absolute = QLabel("Absolute range (UTC)")
+        absolute.setObjectName("popupHeading")
+        layout.addWidget(absolute)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(10)
+        self.from_edit, self.to_edit = self._edit(), self._edit()
+        form.addRow("From", self.from_edit)
+        form.addRow("To", self.to_edit)
+        layout.addLayout(form)
+
+        self.error_lbl = QLabel("")
+        self.error_lbl.setObjectName("hintError")
+        self.error_lbl.setVisible(False)
+        layout.addWidget(self.error_lbl)
+        row = QHBoxLayout()
+        row.addStretch()
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setObjectName("primaryButton")
+        self.apply_btn.setDefault(True)
+        self.apply_btn.clicked.connect(self._apply_absolute)
+        row.addWidget(self.apply_btn)
+        layout.addLayout(row)
+
+    @staticmethod
+    def _edit() -> QDateTimeEdit:
+        edit = QDateTimeEdit()
+        edit.setCalendarPopup(True)
+        edit.setDisplayFormat("yyyy-MM-dd  HH:mm:ss")
+        edit.setTimeZone(QTimeZone.utc())
+        edit.setMinimumWidth(190)
+        return edit
+
+    def open_for(self, first: datetime, last: datetime, start, end, anchor: QWidget):
+        """Show below `anchor`, limited to the capture and preset to the current range."""
+        self._first, self._last = first, last
+        low = _to_qt(first.replace(microsecond=0))
+        high = _to_qt(last.replace(microsecond=0) + timedelta(seconds=1))
+        for edit in (self.from_edit, self.to_edit):
+            edit.setDateTimeRange(low, high)
+        self.from_edit.setDateTime(_to_qt(start or first))
+        self.to_edit.setDateTime(_to_qt(end or last))
+        self.error_lbl.setVisible(False)
+        self.adjustSize()
+        corner = anchor.mapToGlobal(anchor.rect().bottomRight())
+        self.move(corner.x() - self.width(), corner.y() + 4)
+        self.show()
+        self.from_edit.setFocus()
+
+    def _quick(self, anchor: str, span):
+        if self._first is None:
+            return
+        self.chosen.emit(*quick_range(self._first, self._last, anchor, span))
+        self.hide()
+
+    def _apply_absolute(self):
+        start = _from_qt(self.from_edit.dateTime())
+        # "To" is shown to the second; the whole of that second is included.
+        end = _from_qt(self.to_edit.dateTime()) + timedelta(milliseconds=999)
+        if start > end:
+            self.error_lbl.setText("From has to be before To.")
+            self.error_lbl.setVisible(True)
+            return
+        self.chosen.emit(start, end)
+        self.hide()
+
+
+def _swatch(color: str) -> QIcon:
+    """A legend swatch: the event type's colour as a small rounded square."""
+    pixmap = QPixmap(20, 20)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(color))
+    painter.drawRoundedRect(3, 3, 14, 14, 3, 3)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class TimelineChart(QWidget):
@@ -277,7 +440,8 @@ class EventModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return event.as_row()[index.column()]
         if role == Qt.ItemDataRole.ForegroundRole and index.column() == 1:
-            return QColor(KIND_COLORS.get(event.kind, KIND_COLORS["other"]))
+            return QColor(readable(KIND_COLORS.get(event.kind, KIND_COLORS["other"]),
+                                   getattr(self, "dark", True)))
         if role == Qt.ItemDataRole.ToolTipRole:
             return event.detail or event.summary
         return None
@@ -317,6 +481,7 @@ class TimelineView(QWidget):
         title.setObjectName("overviewTitle")
         self.summary_lbl = QLabel("")
         self.summary_lbl.setObjectName("overviewBlurb")
+        self.summary_lbl.setWordWrap(True)
         titles.addWidget(title)
         titles.addWidget(self.summary_lbl)
         header.addLayout(titles, 1)
@@ -326,11 +491,17 @@ class TimelineView(QWidget):
         self.collect_btn.setToolTip("Run the plugins the timeline draws on that have "
                                     "not been run on this image yet.")
         self.collect_btn.clicked.connect(lambda: self.collect_requested.emit(list(self.missing)))
+        self.range_popup = TimeRangePopup(self)
+        self.range_popup.chosen.connect(self._choose_range)
+        self.range_btn = QPushButton("Whole capture")
+        self.range_btn.setObjectName("rangeButton")
+        self.range_btn.setToolTip("Choose the time range: quick ranges or exact dates")
+        self.range_btn.clicked.connect(self._open_range_popup)
         self.reset_btn = QPushButton("Reset Zoom")
         self.reset_btn.clicked.connect(self.reset_zoom)
         self.export_btn = QPushButton("Export CSV…")
         self.export_btn.clicked.connect(self._export)
-        for button in (self.reset_btn, self.export_btn, self.collect_btn):
+        for button in (self.range_btn, self.reset_btn, self.export_btn, self.collect_btn):
             header.addWidget(button)
         layout.addLayout(header)
 
@@ -381,23 +552,24 @@ class TimelineView(QWidget):
             chip.setChecked(True)
             chip.setObjectName("timelineChip")
             chip.setProperty("kind", key)
-            chip.setStyleSheet(
-                f"QPushButton#timelineChip:checked {{ border-left: 4px solid {color}; }}"
-                f"QPushButton#timelineChip {{ border-left: 4px solid transparent; }}")
+            chip.setIcon(_swatch(color))
             chip.toggled.connect(lambda on, k=key: self._toggle_kind(k, on))
             self._chips[key] = chip
             legend.addWidget(chip)
         legend.addStretch()
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Filter events…  (process, PID, path, address)")
+        self.search.setPlaceholderText("Filter by process, PID, path or address")
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedWidth(300)
+        self.search.setMinimumWidth(180)
+        self.search.setMaximumWidth(300)
         self.search.textChanged.connect(lambda _: self._apply())
-        legend.addWidget(self.search)
+        legend.addWidget(self.search, 1)
         body_layout.addLayout(legend)
 
         split = QSplitter(Qt.Orientation.Vertical)
         self.chart = TimelineChart()
+        self.chart.setToolTip("Drag to zoom into a span, click a bar to list its "
+                              "events, scroll to zoom, double-click to reset.")
         self.chart.range_selected.connect(self.zoom_to)
         self.chart.reset_requested.connect(self.reset_zoom)
         split.addWidget(self.chart)
@@ -432,7 +604,10 @@ class TimelineView(QWidget):
     # ── Data ──────────────────────────────────────────────────────────────────
 
     def set_dark(self, dark: bool):
+        self.range_btn.setIcon(icons.icon("calendar", 14, palette(dark)["text_dim"]))
         self.chart.set_dark(dark)
+        self.model.dark = dark
+        self.model.layoutChanged.emit()
 
     def set_payloads(self, payloads: list[dict], missing: list[str] | None = None):
         """Rebuild from stored output; keeps the zoom if it still makes sense."""
@@ -449,9 +624,8 @@ class TimelineView(QWidget):
             chip.setText(f"{KIND_LABELS[key]}  {n:,}")
             chip.setVisible(n > 0)
         self.collect_btn.setEnabled(bool(self.missing))
-        self.collect_btn.setText(
-            f"Collect Timeline Data ({len(self.missing)})" if self.missing
-            else "Timeline Data Collected")
+        self.collect_btn.setVisible(bool(self.missing))
+        self.collect_btn.setText(f"Collect Timeline Data ({len(self.missing)})")
         self.stack.setCurrentIndex(1 if events else 0)
         self._apply()
 
@@ -462,6 +636,19 @@ class TimelineView(QWidget):
             end = start + timedelta(seconds=1)
         self._range = (start, end)
         self._apply()
+
+    def _open_range_popup(self):
+        if not self.events:
+            return
+        start, end = self._range
+        self.range_popup.open_for(self.events[0].time, self.events[-1].time,
+                                  start, end, self.range_btn)
+
+    def _choose_range(self, start, end):
+        if start is None:
+            self.reset_zoom()
+        else:
+            self.zoom_to(start, end)
 
     def reset_zoom(self):
         self._range = (None, None)
@@ -486,9 +673,7 @@ class TimelineView(QWidget):
         if self.events:
             first, last = self.events[0].time, self.events[-1].time
             self.summary_lbl.setText(
-                f"{len(self.events):,} events from {format_time(first)} to "
-                f"{format_time(last)} · drag across the chart to zoom, "
-                "click a bar to list its events, double-click to reset")
+                f"{len(self.events):,} events from {format_time(first)} to {format_time(last)}")
         else:
             self.summary_lbl.setText("Nothing on the timeline yet.")
         if start is not None:
@@ -497,6 +682,8 @@ class TimelineView(QWidget):
         else:
             self.range_lbl.setText(f"{len(shown):,} events")
         self.reset_btn.setEnabled(start is not None)
+        self.range_btn.setText(range_text(start, end))
+        self.range_btn.setEnabled(bool(self.events))
         self.export_btn.setEnabled(bool(shown))
 
     def _activated(self, index):

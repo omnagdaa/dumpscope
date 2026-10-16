@@ -13,16 +13,17 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtCore import QRect, QSize, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
     QLabel, QListWidget,
     QListWidgetItem, QMenu, QMessageBox, QPushButton, QStackedWidget,
+    QStyle, QStyledItemDelegate,
     QVBoxLayout, QWidget,
 )
 
-from ui.theme import build as build_theme
+from ui.theme import build as build_theme, palette
 from core.case import Case, CaseError, forget_case, load_recent, remember_case
 
 
@@ -47,6 +48,59 @@ def _friendly_time(stamp: str) -> str:
     if seconds < 604800:
         return f"{int(seconds // 86400)} d ago"
     return moment.strftime("%Y-%m-%d")
+
+
+_CARD = Qt.ItemDataRole.UserRole + 1
+
+
+class _RecentDelegate(QStyledItemDelegate):
+    """
+    Two lines per case: the name with its number and when it was last opened,
+    then the folder, dimmed. The item text still carries all of it, for
+    screen readers and anything that reads the list programmatically.
+    """
+
+    def __init__(self, dim: str, parent=None):
+        super().__init__(parent)
+        self.dim = QColor(dim)
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), option.fontMetrics.height() * 2 + 18)
+
+    def paint(self, painter, option, index):
+        card = index.data(_CARD)
+        if not card:
+            return super().paint(painter, option, index)
+        # Background, hover and selection come from the stylesheet.
+        option.text = ""
+        option.widget.style().drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, option, painter, option.widget)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        text = option.palette.color(
+            QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text)
+        dim = text if selected else self.dim
+        line = option.fontMetrics.height()
+        box = option.rect.adjusted(12, 8, -12, -8)
+        top = QRect(box.left(), box.top(), box.width(), line)
+        bottom = QRect(box.left(), box.top() + line + 2, box.width(), line)
+
+        painter.save()
+        bold = QFont(option.font)
+        bold.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(bold)
+        painter.setPen(text)
+        name = card["name"]
+        painter.drawText(top, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+        painter.setFont(option.font)
+        painter.setPen(dim)
+        offset = painter.fontMetrics().horizontalAdvance(name) + 24
+        meta = top.adjusted(min(offset, top.width()), 0, 0, 0)
+        painter.drawText(meta, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         card["meta"])
+        painter.drawText(bottom, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         option.fontMetrics.elidedText(
+                             card["path"], Qt.TextElideMode.ElideMiddle, bottom.width()))
+        painter.restore()
 
 
 class CaseManager(QDialog):
@@ -140,7 +194,8 @@ class CaseManager(QDialog):
 
         self.recent_list = QListWidget()
         self.recent_list.setObjectName("recentList")
-        self.recent_list.setAlternatingRowColors(True)
+        self.recent_list.setItemDelegate(
+            _RecentDelegate(palette(self.is_dark)["text_dim"], self.recent_list))
         self.recent_list.itemActivated.connect(self._open_selected)
         self.recent_list.itemDoubleClicked.connect(self._open_selected)
         self.recent_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -226,6 +281,10 @@ class CaseManager(QDialog):
             when = _friendly_time(entry.get("last_opened", ""))
             item = QListWidgetItem(f"{label}\n{detail}")
             item.setData(Qt.ItemDataRole.UserRole, entry["directory"])
+            meta = [m for m in (number if number != "N/A" else "",
+                                entry.get("examiner_name", ""), when) if m]
+            item.setData(_CARD, {"name": entry.get("case_name", "Untitled"),
+                                 "meta": "   ".join(meta), "path": detail})
             item.setToolTip(f"{detail}\nLast opened: {when}" if when else detail)
             if when:
                 item.setText(f"{label}     ·  {when}\n{detail}")

@@ -15,7 +15,7 @@ worse way to find `malfind` than simply typing it.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
     QSizePolicy, QVBoxLayout, QWidget,
@@ -60,6 +60,7 @@ class PluginRibbon(QWidget):
         outer.addWidget(self._build_header())
 
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("ribbonScroll")
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -79,7 +80,18 @@ class PluginRibbon(QWidget):
 
         self.scroll.setWidget(self.inner)
         outer.addWidget(self.scroll, 1)
+        self.scroll.viewport().installEventFilter(self)
         self._apply_height()
+
+    def eventFilter(self, watched, event):
+        """A plain mouse wheel scrolls the ribbon sideways; it has no vertical travel."""
+        if event.type() == QEvent.Type.Wheel and watched is self.scroll.viewport():
+            delta = event.angleDelta()
+            if delta.x() == 0 and delta.y() != 0:
+                bar = self.scroll.horizontalScrollBar()
+                bar.setValue(bar.value() - delta.y())
+                return True
+        return super().eventFilter(watched, event)
 
     def _build_header(self) -> QWidget:
         header = QWidget()
@@ -103,12 +115,16 @@ class PluginRibbon(QWidget):
         # The density toggle is gone: the tiles are compact by default and the
         # glyphs are vectors, so there is nothing a "large" mode reveals that
         # the compact one hides.
+        self.sidebar_btn = self._icon_button(
+            "sidebar", "Show or hide the sidebar  (Ctrl+B)")
         self.palette_btn = self._icon_button(
             "command", "All commands  (Ctrl+Shift+P)")
         self.palette_btn.clicked.connect(self.palette_requested)
         self.theme_btn = self._icon_button("moon", "Switch to the light theme")
         self.theme_btn.clicked.connect(self.theme_toggled)
 
+        bar.addWidget(self.sidebar_btn)
+        bar.addSpacing(4)
         bar.addWidget(self.scope_lbl)
         bar.addStretch()
         bar.addWidget(self.search)
@@ -166,12 +182,11 @@ class PluginRibbon(QWidget):
             column.setContentsMargins(6, 0, 6, 0)
             column.setSpacing(3)
 
-            heading = QLabel(category.upper())
+            # The category colour stays on the glyphs; the heading is a quiet
+            # label, so a ribbon of seven groups is not seven competing colours.
+            heading = QLabel(category)
             heading.setObjectName("ribbonHeading")
-            heading.setFixedHeight(13)
-            # The category colour is data rather than palette, so it is the one
-            # thing here that has to be set per-widget.
-            heading.setStyleSheet(f"color: {color}; background: transparent;")
+            heading.setFixedHeight(15)
 
             tiles = QWidget()
             tiles.setObjectName("ribbonTiles")
@@ -213,7 +228,7 @@ class PluginRibbon(QWidget):
 
     def set_scope_label(self, os_label: str, count: int | None = None):
         total = len(self._buttons) if count is None else count
-        self.scope_lbl.setText(f"{total} {os_label.upper()} PLUGINS")
+        self.scope_lbl.setText(f"{os_label} plugins ({total})")
 
     def _clear(self):
         for _category, group, _ids in self._groups:

@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.vol_runner import (
-    RUN_GATE, _creation_flags, build_environment, case_symbol_args,
+    RUN_GATE, _creation_flags, awaiting_case_symbols, build_environment, case_symbol_args,
     detect_os_from_banner, find_vol3_command,
 )
 
@@ -326,7 +326,8 @@ class ImageProbe(QThread):
         Queues on the shared RunGate like any plugin run: the probe is a vol3
         process too, and it touches the same caches.
         """
-        if not RUN_GATE.acquire(cancelled=lambda: self._cancelled):
+        if not RUN_GATE.acquire(cancelled=lambda: self._cancelled,
+                                solo=lambda: awaiting_case_symbols(self.symbol_dirs)):
             raise RuntimeError("cancelled while queued")
         for folder in [self.cache_dir, *self.symbol_dirs]:
             if folder:

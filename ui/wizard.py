@@ -194,9 +194,9 @@ class CaseWizard(QDialog):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(28, 0, 28, 0)
 
-        title_lbl = QLabel("DumpScope")
+        title_lbl = QLabel("New Case")
         title_lbl.setObjectName("wizardTitle")
-        subtitle = QLabel("Memory Forensics Platform")
+        subtitle = QLabel("Record the case, the examiner and the memory image to analyse.")
         subtitle.setObjectName("wizardSubtitle")
 
         title_col = QVBoxLayout()
@@ -204,8 +204,8 @@ class CaseWizard(QDialog):
         title_col.addWidget(title_lbl)
         title_col.addWidget(subtitle)
 
-        self.theme_btn = QPushButton("☀️  Light")
-        self.theme_btn.setFixedWidth(100)
+        self.theme_btn = QPushButton("Light Theme")
+        self.theme_btn.setFixedWidth(110)
         self.theme_btn.clicked.connect(self.toggle_theme)
 
         header_layout.addLayout(title_col)
@@ -238,12 +238,12 @@ class CaseWizard(QDialog):
         footer_layout = QHBoxLayout(footer)
         footer_layout.setContentsMargins(28, 0, 28, 0)
 
-        self.back_btn = QPushButton("← Back")
+        self.back_btn = QPushButton("Back")
         self.back_btn.setFixedWidth(100)
         self.back_btn.clicked.connect(self.go_back)
         self.back_btn.setEnabled(False)
 
-        self.next_btn = QPushButton("Next →")
+        self.next_btn = QPushButton("Next")
         self.next_btn.setObjectName("primaryBtn")
         self.next_btn.setFixedWidth(100)
         self.next_btn.clicked.connect(self.go_next)
@@ -540,4 +540,4 @@ class CaseWizard(QDialog):
 
     def apply_theme(self):
         QApplication.instance().setStyleSheet(build_theme(dark=self.is_dark))
-        self.theme_btn.setText("☀️  Light" if self.is_dark else "🌙  Dark")
+        self.theme_btn.setText("Light Theme" if self.is_dark else "Dark Theme")

@@ -15,7 +15,7 @@ comes from data rather than from the palette and so cannot live in the theme.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import QLabel, QStyle, QStyleOption, QVBoxLayout, QWidget
 
 from core.plugins import PluginInfo
@@ -159,18 +159,6 @@ class PluginButton(QWidget):
         self.style().drawPrimitive(
             QStyle.PrimitiveElement.PE_Widget, option, painter, self
         )
-        self._paint_accent(painter)
-
-    def _paint_accent(self, painter: QPainter):
-        """
-        The category colour is data, not palette, so it cannot live in the
-        theme. It is drawn as a bar along the top of the tile rather than
-        pushed into the label's stylesheet, which would override the themed
-        font along with the colour.
-        """
-        if not self.info.color:
-            return
-        painter.fillRect(7, 0, self.width() - 14, 2, QColor(self.info.color))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and not self._running:

@@ -2,6 +2,7 @@ import sys
 import os
 import argparse
 import logging
+from PyQt6.QtCore import QThread
 from PyQt6.QtWidgets import QApplication
 from core.case import Case, CaseError, remember_case
 from core.plugins import PluginRegistry
@@ -21,6 +22,51 @@ def setup_logging(log_file: str = None):
     )
     # Suppress noisy vol3 debug unless explicitly wanted
     logging.getLogger("volatility3").setLevel(logging.WARNING)
+
+
+def install_crash_guard():
+    """
+    Keep one bad slot from killing the session.
+
+    With no sys.excepthook of its own, PyQt6 calls qFatal() on any exception
+    that escapes a slot, so a single bug aborts the app and loses unsaved
+    work. This logs it and tells the examiner instead.
+    """
+    import faulthandler
+    import threading
+    import traceback
+    log = logging.getLogger("dumpscope.crash")
+    if sys.stderr is not None:              # pythonw has no stderr
+        faulthandler.enable()
+    showing = False
+
+    def hook(kind, value, tb):
+        nonlocal showing
+        if issubclass(kind, KeyboardInterrupt):
+            sys.__excepthook__(kind, value, tb)
+            return
+        log.critical("Unhandled exception", exc_info=(kind, value, tb))
+        app = QApplication.instance()
+        # No dialog storms from a paint loop, and none off the GUI thread
+        # (a QThread.run that raised lands here too).
+        if showing or app is None or QThread.currentThread() != app.thread():
+            return
+        showing = True
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            box = QMessageBox(QMessageBox.Icon.Critical, "Unexpected Error",
+                              f"{kind.__name__}: {value}\n\nThe action was abandoned; "
+                              "your case data is unaffected. Start with --log FILE "
+                              "to capture details for a bug report.")
+            box.setDetailedText("".join(traceback.format_exception(kind, value, tb)))
+            box.exec()
+        finally:
+            showing = False
+
+    sys.excepthook = hook
+    threading.excepthook = lambda a: log.critical(
+        "Unhandled exception in thread %s", a.thread.name if a.thread else "?",
+        exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
 
 
 def parse_args():
@@ -55,6 +101,7 @@ def parse_args():
 def main():
     args = parse_args()
     setup_logging(args.log)
+    install_crash_guard()
     log = logging.getLogger("dumpscope.main")
 
     app = QApplication(sys.argv)

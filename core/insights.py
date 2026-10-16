@@ -47,7 +47,7 @@ class Finding:
     evidence: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
     def as_row(self) -> list[str]:
-        return [self.severity.upper(), self.category, self.title, self.pid,
+        return [self.severity.title(), self.category, self.title, self.pid,
                 self.process, self.detail, self.plugin.rsplit(".", 1)[-1]]
 
 
@@ -527,7 +527,7 @@ def analyse(payloads: list[dict]) -> list[Finding]:
 
 
 def _pid_key(pid: str):
-    return (0, int(pid)) if pid.isdigit() else (1, pid)
+    return (0, int(pid)) if pid.isdecimal() else (1, pid)
 
 
 def counts(findings: list[Finding]) -> dict[str, int]:

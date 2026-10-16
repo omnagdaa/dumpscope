@@ -423,10 +423,21 @@ class Database:
             ).fetchone()
         if row is None:
             return None
+        # A run saved as raw text, or damaged on disk, is not a table. None
+        # sends every caller down its existing "could not be read" path.
+        try:
+            columns = json.loads(row["columns"]) if row["columns"] else []
+            rows = json.loads(row["result_json"]) if row["result_json"] else []
+        except (TypeError, ValueError) as exc:
+            log.warning("Stored result %s is unreadable: %s", result_id, exc)
+            return None
+        if not isinstance(columns, list) or not isinstance(rows, list):
+            log.warning("Stored result %s is not a table", result_id)
+            return None
         return {
             "plugin": row["plugin"],
-            "columns": json.loads(row["columns"]) if row["columns"] else [],
-            "rows": json.loads(row["result_json"]) if row["result_json"] else [],
+            "columns": [str(c) for c in columns],
+            "rows": [r for r in rows if isinstance(r, list)],
             "created_at": row["created_at"],
         }
 
@@ -443,11 +454,7 @@ class Database:
             latest.setdefault(result["plugin"], result["id"])
         payloads = []
         for result_id in latest.values():
-            try:
-                payload = self.load_result(result_id)
-            except (ValueError, TypeError) as exc:
-                log.warning("Stored result %s is unreadable: %s", result_id, exc)
-                continue
+            payload = self.load_result(result_id)
             if payload:
                 payload["id"] = result_id
                 payloads.append(payload)

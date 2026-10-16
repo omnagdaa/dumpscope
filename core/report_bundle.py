@@ -203,12 +203,9 @@ def _build(case, db, folder, options, result, report, stop):
         _check(stop)
         report(5 + int(25 * n / max(len(results), 1)),
                f"Exporting {item['plugin']} ({n}/{len(results)})…")
-        try:
-            payload = db.load_result(item["id"])
-        except (ValueError, TypeError) as exc:
-            result.warnings.append(f"Result {item['id']} could not be read: {exc}")
-            continue
+        payload = db.load_result(item["id"])
         if not payload:
+            result.warnings.append(f"Result {item['id']} ({item['plugin']}) could not be read.")
             continue
         outputs[item["id"]] = payload
         name = f"{_safe(item['plugin'].rsplit('.', 1)[-1], 'plugin')}_{item['id']}.csv"

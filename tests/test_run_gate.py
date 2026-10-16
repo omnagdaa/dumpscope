@@ -215,3 +215,18 @@ def test_a_crashing_run_still_releases_its_slot(qapp, monkeypatch):
 
 def test_shared_gate_defaults_to_one():
     assert RUN_GATE.limit == 1
+
+
+def test_solo_caps_limit_until_case_has_symbols(tmp_path):
+    # A fresh case: parallel runs must not race the first PDB download.
+    from core.vol_runner import awaiting_case_symbols
+    sym = tmp_path / "symbols"
+    (sym / "windows" / "ntkrnlmp.pdb").mkdir(parents=True)
+    solo = lambda: awaiting_case_symbols([str(sym)])
+    gate = RunGate(4)
+    assert solo() and not awaiting_case_symbols([])
+    assert gate.acquire(solo=solo)
+    assert not gate.acquire(cancelled=lambda: True, solo=solo)
+    (sym / "windows" / "ntkrnlmp.pdb" / "ABC.json.xz").write_bytes(b"")
+    assert not solo()
+    assert gate.acquire(solo=solo)

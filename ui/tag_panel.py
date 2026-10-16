@@ -62,7 +62,7 @@ class TagPanel(QWidget):
         bar.setContentsMargins(10, 0, 6, 0)
         bar.setSpacing(4)
 
-        title = QLabel("TAGS")
+        title = QLabel("Tags")
         title.setObjectName("dockHeading")
 
         self.add_btn = QPushButton("+")

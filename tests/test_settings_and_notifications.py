@@ -54,7 +54,7 @@ def test_a_chosen_family_goes_in_front_of_the_stack_not_over_it():
     # An uninstalled family must fall back the way the default stack does.
     theme.set_fonts(ui_font="Fira Sans")
     sheet = theme.build(dark=True)
-    assert "'Fira Sans', 'Inter'" in sheet
+    assert "'Fira Sans', 'Segoe UI Variable Text'" in sheet
 
 
 def test_the_size_scales_every_rule_together():

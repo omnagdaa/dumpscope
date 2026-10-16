@@ -186,3 +186,14 @@ def test_the_ribbon_carries_the_theme_toggle_and_no_density_button(qapp, tmp_pat
     assert window.is_dark is not dark_before
     assert ribbon.theme_btn.property("glyph") == ("moon" if window.is_dark else "sun")
     window.close()
+
+
+def test_data_colours_are_readable_on_the_light_theme(qapp):
+    from core.insights import SEVERITY_COLORS
+    from core.timeline import KIND_COLORS
+    from ui.theme import LIGHT, _luminance, readable
+
+    ground = _luminance(LIGHT["surface"])
+    for colour in [*SEVERITY_COLORS.values(), *KIND_COLORS.values()]:
+        assert readable(colour, dark=True) == colour
+        assert (ground + 0.05) / (_luminance(readable(colour, dark=False)) + 0.05) >= 4.5

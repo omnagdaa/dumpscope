@@ -118,6 +118,11 @@ if mode == "flood":
         sys.stdout.write(f"{i},{'x' * 60}\n")
     sys.exit(0)
 
+if mode == "bigfield":            # above csv's default 128 KB field cap
+    print("PID,Hexdump")
+    print(f'4,"{"ab" * 200000}"')
+    sys.exit(0)
+
 if mode == "fail":
     sys.stderr.write("Unsatisfied requirement plugins.PsList.kernel\n")
     sys.exit(1)

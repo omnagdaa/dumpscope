@@ -81,12 +81,17 @@ class RunGate:
         return self._waiting
 
     def acquire(self, cancelled: Callable[[], bool] = lambda: False,
-                poll: float = 0.1) -> bool:
-        """Block until a slot is free. False if `cancelled()` became true first."""
+                poll: float = 0.1, solo: Callable[[], bool] = lambda: False) -> bool:
+        """
+        Block until a slot is free. False if `cancelled()` became true first.
+
+        While `solo()` is true the limit is treated as 1. It is re-checked on
+        every poll, so queued runs fan out again as soon as it turns false.
+        """
         with self._cond:
             self._waiting += 1
             try:
-                while self._active >= self._limit:
+                while self._active >= (1 if solo() else self._limit):
                     if cancelled():
                         return False
                     self._cond.wait(poll)
@@ -105,6 +110,28 @@ class RunGate:
 
 
 RUN_GATE = RunGate(limit=1)
+
+
+def awaiting_case_symbols(symbol_dirs: list[str] | None) -> bool:
+    """
+    True when the run uses case symbol folders that hold no ISF yet.
+
+    The first run on such a case downloads the kernel PDB into the case cache
+    and converts it into the case symbols folder. vol3 writes that download in
+    place, so a second run started alongside reads a half-written PDB and dies
+    with "Offset outside of the buffer boundaries". Runs go one at a time until
+    an ISF exists.
+    """
+    # ponytail: only guards the first PDB of a case; a second image with a
+    # different kernel in the same case can still race. Gate per PDB GUID if
+    # that ever happens in practice.
+    dirs = [d for d in (symbol_dirs or []) if d]
+    if not dirs:
+        return False
+    return not any(
+        name.endswith((".json", ".json.xz", ".json.gz", ".json.bz2"))
+        for d in dirs for _, _, files in os.walk(d) for name in files
+    )
 
 
 # ── Symbol-cache corruption ───────────────────────────────────────────────────
@@ -135,6 +162,11 @@ def looks_like_cache_corruption(text: str) -> bool:
 # on plugins that emit tens of thousands of them (filescan, handles).
 _BATCH_ROWS = 250
 _BATCH_SECONDS = 0.10
+
+# csv's default 128 KB field cap is below what malfind hexdumps and long
+# command lines reach; hitting it aborted the whole run. 2**31-1 because the
+# limit is a C long, which is 32-bit on Windows.
+csv.field_size_limit(2**31 - 1)
 
 BANNER_HINTS = {
     "windows": ("windows", "microsoft", "ntoskrnl", "win32k", "ntkrnl"),
@@ -427,10 +459,11 @@ class VolatilityRunner(QThread):
         exit_code = 1
         holding = False
         try:
-            if self.gate.active >= self.gate.limit:
+            solo = lambda: awaiting_case_symbols(self.spec.symbol_dirs)
+            if self.gate.active >= (1 if solo() else self.gate.limit):
                 self.queued.emit(self.gate.active)
                 self.log_line.emit("Queued: waiting for another volatility3 run to finish.")
-            holding = self.gate.acquire(cancelled=lambda: self._cancelled)
+            holding = self.gate.acquire(cancelled=lambda: self._cancelled, solo=solo)
             if not holding:
                 self.log_line.emit("Cancelled before it started.")
                 return
@@ -492,15 +525,26 @@ class VolatilityRunner(QThread):
         stdout = io.TextIOWrapper(
             self._proc.stdout, encoding="utf-8", errors="replace", newline=""
         )
-        self._consume_rows(stdout)
+        # Reading stopped early (cancelled, or the parser raised); a process
+        # still writing would block on a full stdout pipe and never exit.
+        try:
+            self._consume_rows(stdout)
+        except BaseException:
+            self._terminate()
+            raise
         if self._cancelled:
-            # Reading stopped early; a process still writing would block on a
-            # full stdout pipe and wait() would never return.
             self._terminate()
 
         self._proc.wait()
         stderr_thread.join(timeout=2.0)
         code = self._proc.returncode
+        # Popen leaves its pipes open until garbage collection; a session of
+        # several hundred runs would otherwise exhaust the process's handles.
+        for stream in (stdout, self._proc.stderr):
+            try:
+                stream.close()
+            except Exception:
+                pass
 
         if self._cancelled:
             self.log_line.emit("Cancelled by user.")

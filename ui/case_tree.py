@@ -57,6 +57,9 @@ class CaseTree(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._active_source_id: int | None = None
+        # Plugin id -> the name the ribbon and tabs use. The window sets it from
+        # the registry so "Process List" is not "PsList" here.
+        self.plugin_name = lambda plugin_id: plugin_id.rsplit(".", 1)[-1]
         # Placeholder rows are painted with a brush, not a stylesheet, so the
         # colour has to be read out of the palette rather than declared in QSS.
         self._faint = QColor(palette(dark=True)["text_faint"])
@@ -98,15 +101,15 @@ class CaseTree(QWidget):
     def refresh(self, sources: list[dict], results: list[dict],
                 bookmarks: list[dict], active_source_id: int | None = None):
         self._active_source_id = active_source_id
-        expanded = {
-            group.text(0): group.isExpanded()
-            for group in (self.sources_group, self.results_group, self.bookmarks_group)
-        }
+        # Keyed by the item, not its text: the text carries a count, so a new
+        # result would otherwise reopen a group the examiner had collapsed.
+        groups = (self.sources_group, self.results_group, self.bookmarks_group)
+        expanded = {id(group): group.isExpanded() for group in groups}
         self._fill_sources(sources)
         self._fill_results(results)
         self._fill_bookmarks(bookmarks)
-        for group in (self.sources_group, self.results_group, self.bookmarks_group):
-            group.setExpanded(expanded.get(group.text(0), True))
+        for group in groups:
+            group.setExpanded(expanded[id(group)])
 
     @staticmethod
     def _clear(group: QTreeWidgetItem):
@@ -138,7 +141,7 @@ class CaseTree(QWidget):
                 font = item.font(0)
                 font.setBold(True)
                 item.setFont(0, font)
-                item.setText(0, f"{name}   ◂ active")
+                item.setText(0, f"{name}  (active)")
 
         if not sources:
             placeholder = QTreeWidgetItem(self.sources_group, ["No image loaded"])
@@ -149,13 +152,14 @@ class CaseTree(QWidget):
         self._clear(self.results_group)
         self.results_group.setText(0, f"Results  ({len(results)})")
         for result in results:
-            plugin = result["plugin"].rsplit(".", 1)[-1]
+            plugin = self.plugin_name(result["plugin"])
             rows = result.get("row_count") or 0
-            item = QTreeWidgetItem(self.results_group, [f"{plugin}   {rows:,} rows"])
+            noun = "row" if rows == 1 else "rows"
+            item = QTreeWidgetItem(self.results_group, [f"{plugin}   {rows:,} {noun}"])
             item.setData(0, NODE_KIND, KIND_RESULT)
             item.setData(0, NODE_ID, result["id"])
             item.setData(0, NODE_PAYLOAD, result)
-            tooltip = [result["plugin"], f"{rows:,} rows"]
+            tooltip = [result["plugin"], f"{rows:,} {noun}"]
             if result.get("source_name"):
                 tooltip.append(f"from {result['source_name']}")
             if result.get("created_at"):

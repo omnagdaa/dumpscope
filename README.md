@@ -8,7 +8,7 @@ through a memory image without remembering command-line syntax, and you can
 come back to the same case days later with your results, notes and bookmarks
 still there.
 
-- **Stack:** Python 3.12+ (3.14 recommended) · PyQt6 · Volatility 3 · SQLite
+- **Stack:** Python 3.12+ (3.14 recommended) · PyQt6 6.7+ · Volatility 3 · SQLite
 - **Target:** Windows memory images (`.raw`, `.mem`, `.vmem`, `.dmp`, `.img`,
   `.bin`, crash dumps, hibernation files, VMware snapshots). Linux and macOS images are detected, and their
   plugins can be shown, but they are not the focus.
@@ -109,6 +109,13 @@ list. You can:
 - **Scroll** to zoom around the cursor.
 - **Double-click** to reset the zoom.
 - **Toggle** event types from the legend.
+- **Pick a time range** from the range button, Kibana-style:
+  - *Quick select:* the first or last 5 minutes, 15 minutes, hour or 24 hours,
+    or the whole capture. Ranges are relative to the image's own first and
+    last events, not to today, because a memory image is frozen at the
+    moment it was acquired.
+  - *Absolute range:* From and To fields with calendar pop-ups, limited to
+    the days the capture covers. The To second is included in full.
 - **Search** across process, PID, path and address.
 - **Export** the visible events to CSV.
 
@@ -169,13 +176,48 @@ the report.
   extra space. You can also choose to always copy them or to leave them out.
 
 ### Interface
+- **A neutral, instrument-style design.** The interface chrome is grey, and
+  colour is reserved for what it means: severity, tags, timeline event types
+  and plugin categories. One steel-blue accent marks focus, selection and the
+  primary action. Each platform's own UI font is used (Segoe UI, the macOS
+  system font, IBM Plex Sans or Noto Sans on Linux), and monospace is kept
+  for evidence values such as PIDs, offsets and hashes.
+- **Accessible in both themes.** Text meets WCAG AA contrast (4.5:1). Data
+  colours tuned for the dark theme are darkened automatically in the light
+  theme, keeping their hue, and a test enforces it. The window fits a
+  1366 px laptop screen.
 - Dark and light themes (**Ctrl+T**), with a choice of interface and
   monospace fonts.
+- **Collapsible sidebar** (**Ctrl+B**, View → Sidebar, or the sidebar button
+  at the left of the ribbon) gives the results the full width. The choice is
+  remembered between sessions. The sidebar can also be dragged to the right
+  or floated.
+- **Many open tabs.** The button at the right end of the tab bar lists every
+  open tab, pinned ones first, and can close all unpinned results.
+  **Ctrl+Tab** / **Ctrl+Shift+Tab** (or **Ctrl+PgDn** / **Ctrl+PgUp**) cycle
+  through tabs. Long plugin names are elided, so more tabs fit before the bar
+  scrolls.
 - **Command palette** (**Ctrl+Shift+P**) for every window action and plugin.
 - Result tabs can be pinned. Pinned tabs have no close button and stay ahead
   of the others.
+- The plugin ribbon scrolls sideways with the mouse wheel.
 - In-window toast notifications, plus optional desktop notifications. A batch
   of runs is announced once when it finishes, not once per plugin.
+
+### Reliability
+- **A bug never takes the session down.** An unexpected error is logged with
+  its traceback and reported in a dialog, and the window carries on; the case
+  data is untouched. (PyQt6's default is to abort the whole process.)
+  `faulthandler` records a traceback even for a hard interpreter crash.
+- **Plugin output of any size.** Fields beyond the CSV module's 128 KB
+  default, such as long malfind hexdumps and command lines, are read in full.
+  If parsing fails partway, the vol3 process is stopped rather than left
+  blocked on its pipe.
+- **No handle leaks.** Every run closes its pipes, so a long session can run
+  hundreds of plugins without hitting the open-file limit.
+- **Damaged data degrades, it does not crash.** An unreadable stored result
+  opens as "could not be read" and is listed as a warning in reports. Case,
+  settings and recent-case files are written atomically.
 
 ## Install
 
@@ -234,6 +276,8 @@ upgraded.
 | Shortcut | Action |
 | --- | --- |
 | Ctrl+O | Open image |
+| Ctrl+B | Show or hide the sidebar |
+| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab (also Ctrl+PgDn / Ctrl+PgUp) |
 | Ctrl+P | Search plugins |
 | Ctrl+Shift+P | Command palette |
 | Ctrl+E | Export current results |
@@ -296,7 +340,7 @@ and destroys the windows each test leaves behind. Running the suite never
 touches your real settings or recent-case list.
 
 ```bash
-uv run pytest                 # whole suite (about 540 tests, under a minute)
+uv run pytest                 # whole suite (about 555 tests, under a minute)
 uv run pytest -q tests/test_runner_crashes.py   # one file
 uv run pytest -k "gate or corrupt"              # by keyword
 ```
@@ -322,6 +366,9 @@ window through collect → timeline → insights → report against it.
 | Report folder: layout, manifest verification, links, hard-link/copy fallback, cancel and crash cleanup | `test_report_bundle.py` |
 | Per-case symbols: CLI arguments, real vol3 path isolation, PDB fetch, no home-folder writes | `test_case_symbols.py` |
 | Timeline/Insights/Report UI and the end-to-end window flow | `test_ui_analysis.py` |
+| Timeline range picker: quick ranges, absolute From/To, inverted ranges | `test_time_range.py` |
+| Tab overflow list, tab cycling, collapsible sidebar | `test_tab_overflow.py` |
+| Crash regressions found by fuzzing (unicode PIDs, unreadable results, huge fields) | `test_hardening.py` |
 | Cases, database, reports, OS detection, settings | `test_case*.py`, `test_database.py`, `test_report*.py`, `test_os_detect.py`, `test_settings_and_notifications.py` |
 | Widgets: smoke construction, theme, ribbon, tabs, palette, result model | `test_ui_smoke.py`, `test_theme.py`, `test_plugin_ribbon.py`, `test_result_*.py`, `test_command_palette.py` |
 
@@ -336,6 +383,10 @@ window through collect → timeline → insights → report against it.
 | *"cache appears to be corrupted … clearing it did not help"* | Delete the folder named in the message (the case's `cache/` folder) and run the plugin again. |
 | A plugin tab says *Queued* | Another vol3 run is in progress. Wait, cancel it, or raise Tools → Parallel volatility3 Runs. |
 | Windows: *"uv trampoline failed to canonicalize script path"* | Already handled: DumpScope calls volatility3 through the interpreter, not the `vol.exe` script. Make sure you launch with the venv's `python.exe`. |
+
+## Roadmap
+
+What is planned next, and why, is in [ROADMAP.md](ROADMAP.md).
 
 ## Background
 

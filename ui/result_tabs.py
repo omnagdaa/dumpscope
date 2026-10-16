@@ -14,12 +14,18 @@ Two things a plain QTabWidget does not give an examiner working a case:
 
 Pinning is right-click on the tab. The order is kept stable: pinned tabs on the
 left in the order they were pinned, unpinned ones after them.
+
+* A way to reach any tab once there are many. A dozen plugin runs overflow the
+  bar, and Qt's two tiny scroll arrows step one tab at a time. The button at
+  the right end lists every open tab, and Ctrl+Tab / Ctrl+PgUp / Ctrl+PgDn
+  cycle through them, as in a browser.
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
-from PyQt6.QtWidgets import QMenu, QPushButton, QTabBar, QTabWidget
+from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtWidgets import QMenu, QPushButton, QTabBar, QTabWidget, QToolButton
 
 from ui import icons
 
@@ -51,6 +57,25 @@ class ResultTabs(QTabWidget):
         self.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tabBar().customContextMenuRequested.connect(self._show_menu)
         self.tabBar().tabMoved.connect(lambda *_: self.pin_changed.emit())
+        # Long plugin names are cut rather than letting four tabs fill the bar.
+        self.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
+
+        self.list_btn = QToolButton(self)
+        self.list_btn.setObjectName("tabListButton")
+        self.list_btn.setToolTip("All open tabs")
+        self.list_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.list_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.list_btn.setMenu(QMenu(self.list_btn))
+        self.list_btn.menu().aboutToShow.connect(self._fill_tab_list)
+        self.setCornerWidget(self.list_btn, Qt.Corner.TopRightCorner)
+        self._update_list_button()
+        self.apply_theme(True)
+
+        for keys, step in (("Ctrl+Tab", 1), ("Ctrl+PgDown", 1),
+                           ("Ctrl+Shift+Tab", -1), ("Ctrl+PgUp", -1)):
+            shortcut = QShortcut(QKeySequence(keys), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(lambda step=step: self.cycle(step))
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -86,6 +111,45 @@ class ResultTabs(QTabWidget):
         self._is_dark = is_dark
         for index in range(self.count()):
             self._decorate(index)
+        self.list_btn.setIcon(icons.icon("tabs", 14, _colour(is_dark, "text_dim")))
+
+    def cycle(self, step: int):
+        """Move to the next (1) or previous (-1) tab, wrapping round."""
+        if self.count():
+            self.setCurrentIndex((self.currentIndex() + step) % self.count())
+
+    # ── Tab list ──────────────────────────────────────────────────────────────
+
+    def tabInserted(self, index):
+        super().tabInserted(index)
+        self._update_list_button()
+
+    def tabRemoved(self, index):
+        super().tabRemoved(index)
+        self._update_list_button()
+
+    def _update_list_button(self):
+        self.list_btn.setText(f"{self.count()}")
+        self.list_btn.setToolTip(f"All {self.count()} open tabs")
+
+    def _fill_tab_list(self):
+        """Pinned tabs, then results; the current one is checked."""
+        menu = self.list_btn.menu()
+        menu.clear()
+        pinned_done = False
+        for index in range(self.count()):
+            widget = self.widget(index)
+            if not pinned_done and widget not in self._pinned:
+                pinned_done = True
+                if index:
+                    menu.addSeparator()
+            action = menu.addAction(self.tabText(index))
+            action.setCheckable(True)
+            action.setChecked(index == self.currentIndex())
+            action.triggered.connect(lambda _=False, w=widget: self.setCurrentWidget(w))
+        if self.closable_widgets():
+            menu.addSeparator()
+            menu.addAction("Close All Unpinned", self._close_all)
 
     # ── Decoration ────────────────────────────────────────────────────────────
 

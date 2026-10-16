@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -266,7 +267,7 @@ def test_results_from_several_sources_get_separate_timelines(case_db, tmp_path):
 
 def test_corrupt_stored_result_is_a_warning(case_db):
     case, db, _ = case_db
-    with sqlite3.connect(db.db_path) as conn:
+    with closing(sqlite3.connect(db.db_path)) as conn, conn:
         conn.execute("UPDATE analysis_results SET result_json = '{broken' WHERE id = 1")
     result = build_bundle(case, db)
     assert any("could not be read" in w for w in result.warnings)

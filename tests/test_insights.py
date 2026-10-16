@@ -292,7 +292,7 @@ def test_finding_rows_match_columns():
     from core.insights import FINDING_COLUMNS
     f = Finding("high", "c", "t", "d", "1", "p", "windows.x.Y")
     assert len(f.as_row()) == len(FINDING_COLUMNS)
-    assert f.as_row()[0] == "HIGH" and f.as_row()[-1] == "Y"
+    assert f.as_row()[0] == "High" and f.as_row()[-1] == "Y"
 
 
 def test_missing_inputs():
