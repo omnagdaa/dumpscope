@@ -14,6 +14,7 @@ import os
 import argparse
 import logging
 from PyQt6.QtCore import QThread, Qt
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 from core.case import Case, CaseError, remember_case
 from core.plugins import PluginRegistry
@@ -147,6 +148,8 @@ def main():
     app.setApplicationName("DumpScope")
     app.setApplicationVersion(app_version())
     app.setOrganizationName("DumpScope Forensics")
+    app.setWindowIcon(QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         "packaging", "dumpscope.svg")))
     _register_with_windows_shell()
 
     # Built before any window exists: the first inspection imports every

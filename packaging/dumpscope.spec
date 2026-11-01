@@ -14,7 +14,7 @@ UNUSED = (
     "qvirtualkeyboard", "qtvirtualkeyboard", "plugins/tls", "plugins\\tls",
     "plugins/networkinformation", "plugins\\networkinformation",
     "plugins/generic", "plugins\\generic", "plugins/egldeviceintegrations",
-    "plugins/xcbglintegrations", "plugins/wayland", "plugins/platforminputcontexts",
+    "plugins/xcbglintegrations", "plugins/platforminputcontexts",
     "plugins/sqldrivers", "plugins\\sqldrivers",
     # The GTK theme plugin would drag the whole of GTK in from the build machine.
     "qgtk3", "qeglfs", "qlinuxfb", "qminimal", "qvkkhrdisplay", "qvnc", "EglFS",
@@ -40,6 +40,7 @@ a = Analysis(
     pathex=[ROOT],
     datas=[
         (os.path.join(ROOT, "core", "vol_plugins"), "core/vol_plugins"),
+        (os.path.join(ROOT, "packaging", "dumpscope.svg"), "packaging"),
         *collect_data_files("volatility3", include_py_files=True),
         *copy_metadata("dumpscope"),
     ],
@@ -60,10 +61,12 @@ exe = EXE(
     exclude_binaries=True,
     name="dumpscope",
     console=False,          # no terminal window on Windows
+    icon=os.path.join(ROOT, "packaging", "dumpscope.ico" if sys.platform == "win32" else "dumpscope.icns"),
     strip=sys.platform.startswith("linux"),
     upx=False,
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="dumpscope", strip=sys.platform.startswith("linux"))
 
 if sys.platform == "darwin":
-    app = BUNDLE(coll, name="DumpScope.app", bundle_identifier="io.github.omnagdaa.dumpscope")
+    app = BUNDLE(coll, name="DumpScope.app", bundle_identifier="io.github.omnagdaa.dumpscope",
+                 icon=os.path.join(ROOT, "packaging", "dumpscope.icns"))
