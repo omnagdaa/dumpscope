@@ -5,19 +5,19 @@ The previous probe ran ``banners.Banners`` and treated "no banner" as failure.
 That is backwards for the case this tool is mostly used on: ``banners`` only
 ever finds *Linux and Mac* kernel banners, so on a Windows image it is
 guaranteed to find nothing, scanning the entire file to prove it. Windows was
-therefore never actually detected — it was the hardcoded default that happened
+therefore never actually detected: it was the hardcoded default that happened
 to be right, and the status bar said the detection had failed while showing the
 correct answer.
 
 Detection here is three-tier, cheapest first:
 
-1. ``sniff_header`` — a few bytes off the front of the file. Crash dumps,
+1. ``sniff_header``: a few bytes off the front of the file. Crash dumps,
    hibernation files, ELF cores, LiME captures and VMware snapshots all
    announce themselves in their first 8 bytes. Instant, no subprocess.
-2. ``windows.info.Info`` — fast on a Windows image (it walks to the KDBG
+2. ``windows.info.Info``: fast on a Windows image (it walks to the KDBG
    directly) and returns the build, kernel base and capture time, which is
    worth having anyway.
-3. ``banners.Banners`` — the slow full scan, only for images that are not
+3. ``banners.Banners``: the slow full scan, only for images that are not
    Windows.
 
 The result carries a confidence, because "this file starts with PAGEDU64" and
@@ -36,7 +36,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.vol_runner import (
     RUN_GATE, _creation_flags, awaiting_case_symbols, build_environment, case_symbol_args,
-    detect_os_from_banner, find_vol3_command,
+    detect_os_from_banner, discard_partial_isfs, find_vol3_command, stop_process,
 )
 
 log = logging.getLogger("dumpscope.os_detect")
@@ -80,7 +80,7 @@ class ImageProfile:
         qualifier = {
             "certain": "", "likely": " (likely)", "assumed": " (assumed)",
         }.get(self.confidence, "")
-        return f"{name}{qualifier} — {self.method}" if self.method else f"{name}{qualifier}"
+        return f"{name}{qualifier} ({self.method})" if self.method else f"{name}{qualifier}"
 
 
 def sniff_header(path: str) -> ImageProfile:
@@ -185,11 +185,17 @@ class ImageProbe(QThread):
     has confirmed it and collected the image details.
     """
 
-    sniffed  = pyqtSignal(object)     # ImageProfile — header only, may have os=""
-    profiled = pyqtSignal(object)     # ImageProfile — final
+    sniffed  = pyqtSignal(object)     # ImageProfile: header only, may have os=""
+    profiled = pyqtSignal(object)     # ImageProfile: final
     note     = pyqtSignal(str)        # progress text for the status bar
 
     INFO_TIMEOUT = 180
+    # On a case with no symbols yet, windows.info also downloads the kernel
+    # PDB and converts it: measured at 2 to 4 minutes on Windows 11 images,
+    # longer on a slow link. Cutting that off threw away the download, left an
+    # empty ISF behind and fell through to a full banner scan of the image.
+    # A stalled download is caught by vol_runner's socket timeout instead.
+    INFO_TIMEOUT_FETCHING = 1200
     BANNER_TIMEOUT = 300
 
     def __init__(self, image_path: str, symbol_dirs: list[str] | None = None,
@@ -206,12 +212,7 @@ class ImageProbe(QThread):
 
     def cancel(self):
         self._cancelled = True
-        proc = self._proc
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+        stop_process(self._proc)
 
     # ── The probe ─────────────────────────────────────────────────────────────
 
@@ -260,8 +261,8 @@ class ImageProbe(QThread):
             self.profiled.emit(banner)
             return
 
-        # Nothing identified it. Windows remains the best available guess —
-        # banners would have found a Linux or Mac image — but say so plainly
+        # Nothing identified it. Windows remains the best available guess
+        # (banners would have found a Linux or Mac image) but say so plainly
         # rather than presenting a guess as a detection.
         self.profiled.emit(ImageProfile(
             os="windows", confidence="assumed",
@@ -275,7 +276,11 @@ class ImageProbe(QThread):
             "-q", "-r", "csv", "-f", path, "windows.info.Info",
         ]
         try:
-            code, stdout, stderr = self._guarded(command, self.INFO_TIMEOUT)
+            timeout = (self.INFO_TIMEOUT_FETCHING
+                       if awaiting_case_symbols(self.symbol_dirs) else self.INFO_TIMEOUT)
+            if timeout == self.INFO_TIMEOUT_FETCHING:
+                self.note.emit("Downloading this image's kernel symbols into the case…")
+            code, stdout, stderr = self._guarded(command, timeout)
         except subprocess.TimeoutExpired:
             log.info("windows.info timed out on %s", path)
             return None
@@ -334,16 +339,23 @@ class ImageProbe(QThread):
         for folder in [self.cache_dir, *self.symbol_dirs]:
             if folder:
                 os.makedirs(folder, exist_ok=True)
+        if awaiting_case_symbols(self.symbol_dirs):
+            for path in discard_partial_isfs(self.symbol_dirs):
+                log.info("Removed an unfinished symbol file: %s", path)
         try:
             proc = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        # Banners are raw strings from image memory; one bad byte must not
-        # abort identification.
-        encoding="utf-8", errors="replace",
+                # Banners are raw strings from image memory; one bad byte must
+                # not abort identification.
+                encoding="utf-8", errors="replace",
                 env=build_environment(self.symbol_dirs), creationflags=_creation_flags(),
             )
             self._proc = proc
+            # cancel() may have run before _proc was set and found nothing to
+            # stop; the probe would then hold the run gate until its timeout.
+            if self._cancelled:
+                stop_process(proc)
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:

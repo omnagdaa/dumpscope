@@ -66,41 +66,60 @@ def test_the_size_scales_every_rule_together():
     assert "font-size: 0px" not in doubled
 
 
-def test_resetting_restores_the_built_in_stacks():
+def test_resetting_restores_the_built_in_stacks(qapp):
+    # mono_family asks QFontDatabase, which needs the application; and which
+    # family of the stack wins depends on the fonts this machine has.
+    from PyQt6.QtGui import QFontDatabase
     theme.set_fonts(ui_font="Fira Sans", mono_font="Iosevka", size=20)
     theme.set_fonts()
     assert theme.fonts() == {"ui_font": "", "mono_font": "", "size": theme.BASE_FONT_SIZE}
-    assert theme.mono_family() == "JetBrains Mono"
+    installed = set(QFontDatabase.families())
+    stack = [f.strip().strip("'") for f in theme._FONTS["mono_font"].split(",")]
+    assert theme.mono_family() == next((f for f in stack if f in installed), "monospace")
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 
-def test_toasts_stack_and_are_capped(qapp):
+def test_notifications_go_to_the_desktop_only(qapp):
+    """No in-window popups: the window keeps no notification widgets of its own."""
     from PyQt6.QtWidgets import QWidget
-    from ui.notifications import Notifier
+    from ui import notifications
 
     host = QWidget()
-    host.resize(800, 600)
-    notifier = Notifier(host, desktop=False)
-    for index in range(8):
-        notifier.notify(f"Plugin {index} finished", "1,000 rows", "success")
-
-    assert len(notifier._toasts) == 4, "a burst of runs must not bury the window"
-    tops = [toast.y() for toast in notifier._toasts]
-    assert tops == sorted(tops), "newest sits lowest"
-    assert all(t.y() + t.height() <= host.height() for t in notifier._toasts)
+    notifier = notifications.Notifier(host)
+    notifier.notify("Plugin finished", "1,000 rows", "success")
+    notifier.flush()
+    assert notifier.posted == [("Plugin finished", "1,000 rows", "success")]
+    assert not hasattr(notifications, "Toast")
+    assert [w for w in host.findChildren(QWidget) if w.objectName() == "toast"] == []
     notifier.shutdown()
 
 
-def test_turning_desktop_notifications_off_keeps_the_in_app_ones(qapp):
+def test_a_burst_of_messages_becomes_one_notification(qapp):
+    from PyQt6.QtWidgets import QWidget
+    from ui.notifications import Notifier
+
+    notifier = Notifier(QWidget())
+    notifier.notify("PsList finished", "200 rows", "success")
+    notifier.notify("Handles failed", "Exit code 1. See the Log tab.", "error")
+    notifier.notify("All 2 plugins finished", "200 rows across 2 runs.", "success")
+    notifier.flush()
+    assert len(notifier.posted) == 1
+    title, body, level = notifier.posted[0]
+    assert (title, level) == ("Handles failed", "error"), "the most severe message leads"
+    assert "PsList finished: 200 rows" in body and "All 2 plugins finished" in body
+    notifier.shutdown()
+
+
+def test_turning_desktop_notifications_off_posts_nothing(qapp):
     from PyQt6.QtWidgets import QWidget
     from ui.notifications import Notifier
 
     notifier = Notifier(QWidget(), desktop=True)
     notifier.set_desktop_enabled(False)
     notifier.notify("Done", "", "success")
-    assert notifier._tray is None
-    assert len(notifier._toasts) == 1
+    notifier.flush()
+    assert notifier.posted == []
     notifier.shutdown()
 
 

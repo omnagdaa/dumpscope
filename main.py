@@ -1,8 +1,19 @@
 import sys
+
+# A packaged app has no Python to spawn, so it re-runs itself for volatility3.
+if getattr(sys, "frozen", False) and sys.argv[1:2] == ["--vol3-cli"]:
+    from core.vol_runner import _CLI_ENTRY
+    del sys.argv[1]
+    exec(_CLI_ENTRY)                        # fixed source, nothing from the command line
+if getattr(sys, "frozen", False) and sys.argv[1:2] == ["--vol3-introspect"]:
+    from core.plugins import _INTROSPECT_SRC
+    exec(_INTROSPECT_SRC)
+    sys.exit(0)
+
 import os
 import argparse
 import logging
-from PyQt6.QtCore import QThread
+from PyQt6.QtCore import QThread, Qt
 from PyQt6.QtWidgets import QApplication
 from core.case import Case, CaseError, remember_case
 from core.plugins import PluginRegistry
@@ -10,17 +21,29 @@ from ui.case_manager import CaseManager
 from ui.main_window import MainWindow
 
 
-def setup_logging(log_file: str = None):
-    handlers = [logging.StreamHandler(sys.stderr)]
+def app_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("dumpscope")
+    except Exception:
+        return "unknown"
+
+
+def setup_logging(log_file: str | None = None, debug: bool = False):
+    """INFO on the console (DEBUG with --debug); a --log file always gets DEBUG."""
+    console = logging.StreamHandler(sys.stderr)
+    console.setLevel(logging.DEBUG if debug else logging.INFO)
+    handlers: list[logging.Handler] = [console]
     if log_file:
         os.makedirs(os.path.dirname(os.path.abspath(log_file)), exist_ok=True)
         handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
     logging.basicConfig(
         level=logging.DEBUG,
-        format="%(asctime)s  %(levelname)-8s  %(name)s  —  %(message)s",
+        format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
         handlers=handlers,
     )
-    # Suppress noisy vol3 debug unless explicitly wanted
+    # volatility3 is imported in-process only for introspection; its debug
+    # output is noise here.
     logging.getLogger("volatility3").setLevel(logging.WARNING)
 
 
@@ -54,10 +77,12 @@ def install_crash_guard():
         showing = True
         try:
             from PyQt6.QtWidgets import QMessageBox
-            box = QMessageBox(QMessageBox.Icon.Critical, "Unexpected Error",
-                              f"{kind.__name__}: {value}\n\nThe action was abandoned; "
-                              "your case data is unaffected. Start with --log FILE "
-                              "to capture details for a bug report.")
+            box = QMessageBox(QMessageBox.Icon.Critical, "Unexpected Error", "")
+            # The message can quote image data; never let Qt render it as HTML.
+            box.setTextFormat(Qt.TextFormat.PlainText)
+            box.setText(f"{kind.__name__}: {value}\n\nThe action was abandoned; "
+                        "your case data is unaffected. Start with --log FILE "
+                        "to capture details for a bug report.")
             box.setDetailedText("".join(traceback.format_exception(kind, value, tb)))
             box.exec()
         finally:
@@ -72,12 +97,18 @@ def install_crash_guard():
 def parse_args():
     p = argparse.ArgumentParser(
         prog="dumpscope",
-        description="DumpScope — Memory Forensics Platform",
+        description="DumpScope memory forensics workbench",
     )
+    p.add_argument("--version", action="version", version=f"%(prog)s {app_version()}")
     p.add_argument(
         "--log",
         metavar="FILE",
         help="Write exceptions and debug logs to FILE (e.g. --log dumpscope.log)",
+    )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show debug messages on the console as well.",
     )
     p.add_argument(
         "--refresh-plugins",
@@ -100,12 +131,21 @@ def parse_args():
 
 def main():
     args = parse_args()
-    setup_logging(args.log)
+    setup_logging(args.log, debug=args.debug)
     install_crash_guard()
     log = logging.getLogger("dumpscope.main")
 
+    # PyInstaller points LD_LIBRARY_PATH at its bundled libraries; the browser
+    # that opens a report must not inherit that. Loaded libraries are unaffected.
+    if getattr(sys, "frozen", False) and sys.platform.startswith("linux"):
+        original = os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
+        os.environ.pop("LD_LIBRARY_PATH", None)
+        if original:
+            os.environ["LD_LIBRARY_PATH"] = original
+
     app = QApplication(sys.argv)
     app.setApplicationName("DumpScope")
+    app.setApplicationVersion(app_version())
     app.setOrganizationName("DumpScope Forensics")
     _register_with_windows_shell()
 
@@ -115,7 +155,7 @@ def main():
     # Subsequent launches read the cache and return immediately.
     registry = PluginRegistry.load(refresh=args.refresh_plugins)
     if registry.available:
-        log.info("volatility3 %s — %d plugins", registry.vol_version, len(registry.all()))
+        log.info("volatility3 %s, %d plugins", registry.vol_version, len(registry.all()))
     else:
         log.warning("volatility3 could not be inspected; plugin metadata is unavailable")
 
@@ -136,7 +176,7 @@ def main():
         # examiner picks, otherwise Close Case would reopen the same case.
         args.case = None
         args.analysis = False
-        log.info("Case closed — returning to the case manager")
+        log.info("Case closed, returning to the case manager")
 
 
 def _register_with_windows_shell():
@@ -177,7 +217,7 @@ def _select_case(args, log):
 
     manager = CaseManager()
     if manager.exec() != CaseManager.DialogCode.Accepted or manager.selected_case is None:
-        log.info("No case selected — exiting.")
+        log.info("No case selected, exiting.")
         return None
     log.info("Opened case %s", manager.selected_case.display_label)
     return manager.selected_case

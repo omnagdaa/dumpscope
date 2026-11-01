@@ -210,3 +210,74 @@ def test_stderr_tail_is_bounded():
 def test_malformed_progress_lines_never_raise(line):
     runner = VolatilityRunner(RunSpec("/i.raw", "p", [], []))
     runner._handle_stderr_line(line)
+
+
+# ── Runs that collide with each other ────────────────────────────────────────
+
+def test_a_locked_cache_is_retried_without_clearing_it(qapp, stub_vol, tmp_path):
+    """Another vol3 process writing the cache is not corruption."""
+    runner, out = _run(_spec("locked", "--stub-marker", str(tmp_path / "m")))
+    assert out["exit"] == 0 and out["rows"] == [["4", "System"]]
+    assert not runner.spec.clear_cache and not runner.retried_after_cache_clear
+    assert any("Retrying" in line for line in out["log"])
+
+
+def test_a_stalled_symbol_download_is_retried(qapp, stub_vol, tmp_path):
+    runner, out = _run(_spec("stalled", "--stub-marker", str(tmp_path / "m")))
+    assert out["exit"] == 0 and out["rows"] == [["4", "System"]]
+    assert not runner.spec.clear_cache
+    assert any("download stalled" in line for line in out["log"])
+
+
+def test_vol3_downloads_have_a_timeout():
+    """
+    vol3 calls urlopen() without one; a symbol server that stops sending kept
+    the first run of a case, and every run queued behind it, waiting forever.
+    """
+    assert (f"socket.setdefaulttimeout({vol_runner.DOWNLOAD_STALL_SECONDS})"
+            in vol_runner._CLI_ENTRY)
+
+
+def test_lock_timeouts_are_not_mistaken_for_corruption():
+    assert not looks_like_cache_corruption("sqlite3.OperationalError: database is locked")
+    assert looks_like_cache_corruption("sqlite3.OperationalError: disk I/O error")
+
+
+def test_clearing_the_cache_waits_until_no_other_run_is_active(qapp, stub_vol):
+    """--clear-cache deletes files other vol3 processes may be reading."""
+    gate = RunGate(2)
+    assert gate.acquire()                    # another run is busy on the case
+    runner = VolatilityRunner(_spec("corrupt"), gate=gate)
+    finished = []
+    runner.run_finished.connect(finished.append)
+    runner.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not runner.spec.clear_cache:
+        qapp.processEvents()
+        time.sleep(0.01)
+    time.sleep(0.5)
+    qapp.processEvents()
+    assert runner.spec.clear_cache and finished == [], "the retry must wait its turn"
+    gate.release()                           # the other run ends
+    assert runner.wait(10000)
+    qapp.processEvents()
+    assert finished == [0]
+
+
+def test_cancel_kills_a_process_that_ignores_sigterm(qapp, stub_vol, monkeypatch):
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("terminate is already a hard kill on Windows")
+    monkeypatch.setattr(vol_runner, "_KILL_GRACE_SECONDS", 0.5)
+    runner = VolatilityRunner(_spec("ignore_term"), gate=RunGate(1))
+    started = []
+    runner.columns_ready.connect(started.append)
+    runner.start()
+    deadline = time.monotonic() + 10
+    while not started and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    began = time.monotonic()
+    runner.cancel()
+    assert runner.wait(10000), "a window waiting on this thread would hang on close"
+    assert time.monotonic() - began < 8

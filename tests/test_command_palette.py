@@ -2,7 +2,7 @@
 The command palette: ranking, and the window's own command list.
 
 The palette is the only surface that reaches every plugin without scrolling the
-ribbon, so the ranking is load-bearing — a query that puts "Big Pools" above
+ribbon, so the ranking is load-bearing: a query that puts "Big Pools" above
 "Process List" for "psl" would make it useless.
 """
 

@@ -1,7 +1,7 @@
 """
 Parameter prompt for plugins that take arguments.
 
-Several volatility3 plugins cannot run bare — windows.strings.Strings needs a
+Several volatility3 plugins cannot run bare: windows.strings.Strings needs a
 strings file, windows.pedump.PEDump needs a base address, regexscan needs a
 pattern. The registry knows which, and this dialog builds a form from the
 introspected requirements rather than from a hand-written list, so a plugin
@@ -49,7 +49,7 @@ class PluginArgsDialog(QDialog):
         super().__init__(parent)
         self.info = info
         self._fields: dict[str, object] = {}
-        self.setWindowTitle(f"Parameters — {info.short_name}")
+        self.setWindowTitle(f"Parameters: {info.short_name}")
         self.setMinimumWidth(560)
         self._build()
 

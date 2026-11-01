@@ -16,8 +16,9 @@ from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QProgressBar, QPushButton, QTextEdit, QVBoxLayout,
+    QListWidgetItem, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
 )
+from ui.theme import plain_label
 
 from core.symbol_downloader import SymbolDownloader, SymbolFetcher, list_symbols
 from ui.theme import restyle
@@ -60,15 +61,15 @@ class SymbolDialog(QDialog):
         sym_layout = QVBoxLayout(sym_grp)
         where = QLabel(
             f"Stored in {self.symbols_dir}\n"
-            "Only this folder is used — volatility3's shared cache is not, so the "
-            "case carries every symbol table its results depend on."
+            "Only this folder is used, not volatility3's shared cache, so the case "
+            "holds every symbol table its results depend on."
             if self.case_mode else
             "Quick Analysis has no case folder, so volatility3's own shared symbol "
             "cache is used.")
         where.setObjectName("fieldHint")
         where.setWordWrap(True)
         where.setMinimumHeight(where.sizeHint().height() + 14)
-        self.sym_status = QLabel("")
+        self.sym_status = plain_label("")
         self.sym_status.setWordWrap(True)
         self.sym_list = QListWidget()
         self.sym_list.setMaximumHeight(110)
@@ -114,7 +115,9 @@ class SymbolDialog(QDialog):
         self.progress_bar.setVisible(False)
         self.progress_bar.setFixedHeight(8)
         self.progress_bar.setTextVisible(False)
-        self.dl_log = QTextEdit()
+        # Plain text: it quotes volatility3's stderr, and QTextEdit.append
+        # renders anything that looks like markup.
+        self.dl_log = QPlainTextEdit()
         self.dl_log.setReadOnly(True)
         self.dl_log.setMinimumHeight(70)
         self.dl_log.setMaximumHeight(110)
@@ -174,7 +177,7 @@ class SymbolDialog(QDialog):
         elif self.case_mode:
             self.sym_status.setText(
                 "No symbol tables yet. Fetch the ones this image needs, or load "
-                "the image and run a plugin — volatility3 fetches them into the "
+                "the image and run a plugin; volatility3 downloads them into the "
                 "case automatically when it has network access.")
             self.sym_status.setObjectName("hintWarn")
         else:
@@ -207,16 +210,16 @@ class SymbolDialog(QDialog):
         self.progress_bar.setRange(0, 0)              # indeterminate
         self.dl_log.clear()
         self._fetcher = SymbolFetcher(self.image_path, self.base_dir, parent=self)
-        self._fetcher.progress.connect(self.dl_log.append)
+        self._fetcher.progress.connect(self.dl_log.appendPlainText)
         self._fetcher.done.connect(self._on_fetch_done)
         self._fetcher.start()
 
     def _on_fetch_done(self, ok: bool, message: str, added: list):
         self.progress_bar.setRange(0, 100)
         self._busy(False)
-        self.dl_log.append(("✓ " if ok else "✗ ") + message)
+        self.dl_log.appendPlainText(("✓ " if ok else "✗ ") + message)
         for path in added:
-            self.dl_log.append(f"  + {path}")
+            self.dl_log.appendPlainText(f"  + {path}")
         if self._fetcher is not None:
             self._fetcher.wait(2000)
             self._fetcher = None
@@ -229,16 +232,16 @@ class SymbolDialog(QDialog):
         self._busy(True)
         self.progress_bar.setValue(0)
         self.dl_log.clear()
-        self.dl_log.append(f"Starting download: {pack}…")
+        self.dl_log.appendPlainText(f"Starting download: {pack}…")
         self._downloader = SymbolDownloader(self.base_dir, pack, parent=self)
-        self._downloader.progress.connect(self.dl_log.append)
+        self._downloader.progress.connect(self.dl_log.appendPlainText)
         self._downloader.percent.connect(self.progress_bar.setValue)
         self._downloader.done.connect(self._on_download_done)
         self._downloader.start()
 
     def _on_download_done(self, success: bool, msg: str):
         self._busy(False)
-        self.dl_log.append(("✓ " if success else "✗ ") + msg)
+        self.dl_log.appendPlainText(("✓ " if success else "✗ ") + msg)
         if self._downloader:
             self._downloader.wait(2000)
             self._downloader = None

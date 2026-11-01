@@ -43,7 +43,7 @@ def test_the_two_stylesheets_differ_only_in_colour():
 def test_results_table_is_styled():
     """
     QTableWidget selectors do not match a plain QTableView, and the results
-    grid is a QTableView — it went unthemed for exactly this reason.
+    grid is a QTableView: it went unthemed for exactly this reason.
     """
     assert "QTableView" in theme.build(dark=True)
 

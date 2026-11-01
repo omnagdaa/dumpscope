@@ -23,7 +23,7 @@ def test_the_credential_plugins_are_available(registry):
     for plugin_id in ("windows.hashdump.Hashdump", "windows.lsadump.Lsadump",
                       "windows.cachedump.Cachedump"):
         assert registry.get(plugin_id) is not None, (
-            f"{plugin_id} is missing — is pycryptodome installed?"
+            f"{plugin_id} is missing: is pycryptodome installed?"
         )
 
 

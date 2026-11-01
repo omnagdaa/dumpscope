@@ -89,9 +89,13 @@ def test_report_escapes_hostile_content(tmp_path):
     tags = {t.lower() for t in re.findall(r"<\s*/?\s*([a-zA-Z][\w-]*)", report)}
     assert tags <= {
         "!doctype", "html", "head", "meta", "title", "style", "body", "div",
-        "h1", "h2", "p", "dl", "dt", "dd", "table", "thead", "tbody", "tr",
-        "th", "td", "span", "footer",
+        "h1", "h2", "h3", "p", "dl", "dt", "dd", "table", "thead", "tbody", "tr",
+        "th", "td", "span", "footer", "a", "b", "ul", "ol", "li",
     }, tags
+
+    # Links are the report's own table of contents, not anything from the case.
+    hrefs = re.findall(r"href=['\"]([^'\"]*)", report)
+    assert hrefs and all(h.startswith("#") for h in hrefs), hrefs
 
 
 def test_json_report_round_trips(populated):

@@ -1,14 +1,28 @@
 [project]
 name = "dumpscope"
 version = "0.1.0"
-description = "Memory Forensics Application"
+description = "Desktop workbench for memory forensics with volatility3: cases, triage, timelines and reports"
+readme = "README.md"
 requires-python = ">=3.12"
+keywords = ["forensics", "dfir", "memory-forensics", "volatility3", "incident-response"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: System :: Recovery Tools",
+]
 dependencies = [
     "pyqt6>=6.7.0",          # QDateTimeEdit.setTimeZone (timeline range picker)
     "volatility3>=2.5.0",
     # volatility3's credential plugins (hashdump, lsadump, cachedump) import
     # Cryptodome at module load; without it they do not register at all, and
-    # vol3 reports no error — the plugins simply never appear.
+    # vol3 reports no error: the plugins simply never appear.
     "pycryptodome>=3.20.0",
 ]
 
@@ -22,7 +36,30 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.8",
+]
+package = [
+    "pyinstaller>=6.16",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Correctness first: pyflakes, syntax/runtime errors, bugbear, modern syntax.
+select = ["E4", "E7", "E9", "F", "B", "UP", "SIM"]
+ignore = [
+    "B008",    # QModelIndex() as a default argument is the standard Qt idiom
+    "B905",    # zip() over rows and their own header; lengths are equal by construction
+    "E731",    # short lambdas assigned for readability in a few call sites
+    "SIM105",  # contextlib.suppress is not clearer than try/except/pass here
+    "SIM108",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"main.py" = ["E402"]      # the packaged-app dispatch has to run before the imports
+"tests/*" = ["SIM115", "E741"]

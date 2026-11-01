@@ -4,8 +4,8 @@ The application stylesheet.
 Previously this file was two 300-line blocks of literal QSS that had drifted
 apart: a rule fixed in the dark block was often missing from the light one, and
 widgets added later referenced object names neither block styled at all. Worst
-of all both blocks styled ``QTableWidget`` while the results table — the surface
-an examiner actually spends the day looking at — is a ``QTableView``, which
+of all both blocks styled ``QTableWidget`` while the results table (the surface
+an examiner actually spends the day looking at) is a ``QTableView``, which
 ``QTableWidget`` selectors do not match. It was rendering unthemed.
 
 So there is now one stylesheet template and two palettes. Every colour is a
@@ -13,7 +13,7 @@ token; the template contains no literal colours, which makes it impossible for
 the two themes to diverge again.
 
 Widgets should not set colours inline. Where a widget needs to look different
-by state, give it a Qt property and style it here — see ``statusDot[state=…]``
+by state, give it a Qt property and style it here: see ``statusDot[state=…]``
 and ``osBadge[os=…]``. Inline stylesheets win over the application stylesheet,
 so an inline colour is a permanent theme override that no palette can reach.
 """
@@ -28,8 +28,8 @@ from string import Template
 # The accent ramp matches the plugin category colours in core.plugins, so the
 # ribbon and the chrome around it belong to the same palette.
 
-# Chrome is neutral graphite; hue is reserved for what carries meaning —
-# severity, tags, event types, plugin categories — so any colour on screen
+# Chrome is neutral graphite; hue is reserved for what carries meaning
+# (severity, tags, event types, plugin categories) so any colour on screen
 # says something about the evidence. The one accent is a steel blue for focus,
 # selection and the primary action, the convention examiners already read in
 # every other tool on their desk. Text pairs meet WCAG AA (4.5:1).
@@ -479,27 +479,6 @@ QLabel#osBadge[probing="true"] {
     color: $text_faint;
 }
 
-/* ── Toasts ────────────────────────────────────────────────────────────── */
-/* A status bar holds one message, so six plugins finishing overwrite each
-   other and none of them is visible from another window. */
-QWidget#toast {
-    background-color: $surface_high;
-    border: 1px solid $border;
-    border-left: 3px solid $accent;
-    border-radius: 4px;
-}
-QWidget#toast[level="success"] { border-left-color: $ok; }
-QWidget#toast[level="warning"] { border-left-color: $warn; }
-QWidget#toast[level="error"]   { border-left-color: $danger; }
-QLabel#toastTitle {
-    font-size: 12px;
-    font-weight: 600;
-    color: $text;
-    background: transparent;
-}
-QLabel#toastBody { font-size: 11px; color: $text_dim; background: transparent; }
-QLabel#toastGlyph { background: transparent; }
-
 /* ── Command palette ───────────────────────────────────────────────────── */
 QDialog#commandPalette {
     background-color: $surface;
@@ -822,10 +801,34 @@ def plain(text, limit: int = 2000) -> str:
     """
     if not text:
         return ""
+    return f"<p style='white-space:pre-wrap'>{plain_inline(text, limit)}</p>"
+
+
+def plain_inline(text, limit: int = 2000) -> str:
+    """plain() without the paragraph, for a value inside a sentence or a cell."""
+    if text is None or text == "":
+        return ""
     text = str(text)
     if len(text) > limit:
         text = text[:limit] + "…"
-    return f"<p style='white-space:pre-wrap'>{html.escape(text)}</p>"
+    return html.escape(text)
+
+
+def plain_label(text: str = "", parent=None):
+    """
+    A QLabel that shows `text` as text, never as HTML.
+
+    QLabel's default (AutoText) renders anything that looks like markup, so a
+    process name, path or case field shown in a plain QLabel can make Qt load
+    an <img> from a UNC path or a device file. The format is set before the
+    text, so the text is never parsed as HTML at all.
+    """
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QLabel
+    label = QLabel(parent)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setText("" if text is None else str(text))
+    return label
 
 
 def _luminance(hex_color: str) -> float:

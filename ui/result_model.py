@@ -9,6 +9,14 @@ that bought:
   from the values it sees and sorts on the parsed value, so numbers, hex
   addresses and timestamps order correctly.
 
+* Sorting happens here, not in the proxy. QSortFilterProxyModel compares rows
+  by calling back into Python once per comparison (about 3.5 million calls
+  for 200,000 rows) and that froze the window for 10-25 seconds per header
+  click even with every key precomputed. The model instead computes each
+  column's keys once, sorts a permutation with list.sort, and presents rows
+  through it. The rows themselves stay in vol3's emitted order, which is what
+  gets stored and exported as "the result".
+
 * Scale. A widget-per-cell costs roughly a kilobyte each; plugins like filescan
   and handles emit six figures of rows. A model stores the strings and nothing
   else, and the view only materialises what is on screen.
@@ -24,7 +32,8 @@ import re
 from datetime import datetime
 
 from PyQt6.QtCore import (
-    QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt,
+    QAbstractItemModel, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt,
+    QTimer,
 )
 from PyQt6.QtGui import QColor, QFont
 
@@ -42,6 +51,12 @@ _ADDRESS_HINTS = ("offset", "address", "base", "vaddr", "paddr", "start", "end")
 TYPE_STRING, TYPE_INT, TYPE_HEX, TYPE_FLOAT, TYPE_DATETIME = range(5)
 
 
+
+# While sorted, streamed rows land at the bottom and are folded into place this
+# long after the first of them arrives: one re-sort per burst, not per batch.
+_RESORT_DELAY_MS = 250
+
+_SORT_HINT = QAbstractItemModel.LayoutChangeHint.VerticalSortHint
 
 # How many values to look at before deciding a column's type. Sampling beyond
 # the first screenful avoids a header-adjacent "N/A" fixing the type as string.
@@ -77,6 +92,13 @@ class ResultTableModel(QAbstractTableModel):
         self._types: list[int] = []
         self._type_samples: list[int] = []
         self._type_locked: list[bool] = []
+        # View row -> index into _rows while sorted; None means emitted order.
+        self._order: list[int] | None = None
+        self._sort_column = -1
+        self._sort_order = Qt.SortOrder.AscendingOrder
+        # column -> (type the keys were computed for, key per stored row)
+        self._key_cache: dict[int, tuple[int, list]] = {}
+        self._resort_timer: QTimer | None = None
 
     # ── Population ────────────────────────────────────────────────────────────
 
@@ -91,6 +113,9 @@ class ResultTableModel(QAbstractTableModel):
         self._types = [TYPE_STRING] * len(self._columns)
         self._type_samples = [0] * len(self._columns)
         self._type_locked = [False] * len(self._columns)
+        self._key_cache = {}
+        self._sort_column = -1
+        self._order = None
         self.endResetModel()
 
     def append_rows(self, rows: list[list[str]]) -> None:
@@ -123,7 +148,11 @@ class ResultTableModel(QAbstractTableModel):
         self.beginInsertRows(QModelIndex(), first, first + len(prepared) - 1)
         self._rows.extend(prepared)
         self._depths.extend(depths)
+        if self._order is not None:
+            self._order.extend(range(first, first + len(prepared)))
         self.endInsertRows()
+        if self._order is not None:
+            self._schedule_resort()
 
     def clear(self) -> None:
         self.beginResetModel()
@@ -132,6 +161,8 @@ class ResultTableModel(QAbstractTableModel):
         self._types = [TYPE_STRING] * len(self._columns)
         self._type_samples = [0] * len(self._columns)
         self._type_locked = [False] * len(self._columns)
+        self._key_cache = {}
+        self._order = [] if self._sort_column >= 0 else None
         self.endResetModel()
 
     def _observe_types(self, row: list[str]) -> None:
@@ -193,6 +224,7 @@ class ResultTableModel(QAbstractTableModel):
         row, col = index.row(), index.column()
         if row >= len(self._rows) or col >= len(self._columns):
             return None
+        row = self._stored(row)
         value = self._rows[row][col]
 
         if role == Qt.ItemDataRole.DisplayRole:
@@ -231,8 +263,8 @@ class ResultTableModel(QAbstractTableModel):
         Follow the palette for the colours Qt paints with a brush.
 
         This announces a data change, not a layout change. A bare
-        ``layoutChanged`` — without the ``layoutAboutToBeChanged`` that Qt
-        requires to be paired with it — leaves QSortFilterProxyModel rebuilding
+        ``layoutChanged`` (without the ``layoutAboutToBeChanged`` that Qt
+        requires to be paired with it) leaves QSortFilterProxyModel rebuilding
         its index mapping without having saved the old one, so every index the
         view is still holding points into freed memory. The next mouse move
         over the table dereferences one and the process dies in
@@ -251,10 +283,14 @@ class ResultTableModel(QAbstractTableModel):
 
     # ── Sorting ───────────────────────────────────────────────────────────────
 
-    def sort_key(self, row: int, col: int):
-        """A comparable key for (row, col) honouring the column's inferred type."""
-        value = self._rows[row][col].strip()
-        kind = self._types[col]
+    def _stored(self, row: int) -> int:
+        """The index into _rows of view row `row`."""
+        return self._order[row] if self._order is not None else row
+
+    @staticmethod
+    def _key(value: str, kind: int):
+        """A comparable key for one cell, honouring its column's inferred type."""
+        value = value.strip()
         if not value or value == "N/A":
             # Absent values sort last in ascending order rather than first.
             return (1, 0) if kind != TYPE_STRING else (1, "")
@@ -268,9 +304,88 @@ class ResultTableModel(QAbstractTableModel):
             if kind == TYPE_DATETIME:
                 parsed = _parse_datetime(value)
                 return (0, parsed.timestamp()) if parsed else (1, 0)
-        except ValueError:
+        except (ValueError, OverflowError, OSError):
             return (1, 0)
         return (0, value.lower())
+
+    def sort_key(self, row: int, col: int):
+        """A comparable key for view row `row`, column `col`."""
+        return self._key(self._rows[self._stored(row)][col], self._types[col])
+
+    def _sort_keys(self, col: int) -> list:
+        """
+        Every stored row's key for `col`, computed once and extended as rows
+        stream in. Recomputed only if the column's inferred type changes.
+        """
+        kind = self._types[col]
+        cached = self._key_cache.get(col)
+        keys = cached[1] if cached is not None and cached[0] == kind else []
+        if len(keys) < len(self._rows):
+            key = self._key
+            keys.extend(key(row[col], kind) for row in self._rows[len(keys):])
+        self._key_cache[col] = (kind, keys)
+        return keys
+
+    @property
+    def sort_column(self) -> int:
+        return self._sort_column
+
+    def sort(self, column: int, order=Qt.SortOrder.AscendingOrder) -> None:
+        """
+        Order the view by `column`; a column outside the table restores
+        vol3's emitted order. The stored rows are never reordered.
+        """
+        if self._resort_timer is not None:
+            self._resort_timer.stop()
+        self.layoutAboutToBeChanged.emit([], _SORT_HINT)
+        persistent = self.persistentIndexList()
+        stored = [self._stored(index.row()) for index in persistent]
+
+        if 0 <= column < len(self._columns):
+            keys = self._sort_keys(column)
+            self._order = sorted(
+                range(len(self._rows)), key=keys.__getitem__,
+                reverse=order == Qt.SortOrder.DescendingOrder,
+            )
+            self._sort_column, self._sort_order = column, order
+        else:
+            self._order = None
+            self._sort_column = -1
+
+        if persistent:
+            position = list(range(len(self._rows)))
+            if self._order is not None:
+                for view_row, stored_row in enumerate(self._order):
+                    position[stored_row] = view_row
+            self.changePersistentIndexList(persistent, [
+                self.index(position[s], index.column())
+                for s, index in zip(stored, persistent)
+            ])
+        self.layoutChanged.emit([], _SORT_HINT)
+
+    def _schedule_resort(self) -> None:
+        if self._resort_timer is None:
+            self._resort_timer = QTimer(self)
+            self._resort_timer.setSingleShot(True)
+            self._resort_timer.setInterval(_RESORT_DELAY_MS)
+            self._resort_timer.timeout.connect(self._resort)
+        # Not restarted while pending: a steady stream must still get sorted.
+        if not self._resort_timer.isActive():
+            self._resort_timer.start()
+
+    def _resort(self) -> None:
+        if self._sort_column >= 0:
+            self.sort(self._sort_column, self._sort_order)
+
+    def row_matches(self, row: int, needle: str = "",
+                    regex: re.Pattern | None = None) -> bool:
+        """Whether view row `row` contains `needle` (lowercase) or matches `regex`."""
+        values = self._rows[self._stored(row)]
+        if regex is not None:
+            return any(regex.search(v) for v in values)
+        # One join and one lower() per row rather than one per cell. NUL never
+        # occurs in vol3's CSV, so a match cannot straddle two cells.
+        return needle in "\0".join(values).lower()
 
     # ── Accessors ─────────────────────────────────────────────────────────────
 
@@ -279,14 +394,21 @@ class ResultTableModel(QAbstractTableModel):
         return list(self._columns)
 
     def row_values(self, row: int) -> list[str]:
-        return list(self._rows[row]) if 0 <= row < len(self._rows) else []
+        """The values of view row `row` (which follows any sort)."""
+        if not 0 <= row < len(self._rows):
+            return []
+        return list(self._rows[self._stored(row)])
+
+    def emitted_rows(self) -> list[list[str]]:
+        """Every row in the order vol3 emitted it, whatever the view's sort."""
+        return [list(row) for row in self._rows]
 
     def row_dict(self, row: int) -> dict[str, str]:
         return dict(zip(self._columns, self.row_values(row)))
 
     def find_row(self, wanted: dict, keys: list[str] | None = None) -> int:
         """
-        The index of the row matching `wanted`, or -1.
+        The view row matching `wanted`, or -1.
 
         Matching is by value across the named columns, because a tag recorded
         yesterday has to survive today's sort order and today's re-run. Columns
@@ -302,15 +424,22 @@ class ResultTableModel(QAbstractTableModel):
         ]
         if not pairs:
             return -1
-        for index, values in enumerate(self._rows):
+        for view_row in range(len(self._rows)):
+            values = self._rows[self._stored(view_row)]
             if all(column < len(values) and values[column] == value
                    for column, value in pairs):
-                return index
+                return view_row
         return -1
 
 
 class ResultFilterProxy(QSortFilterProxyModel):
-    """Case-insensitive substring filter across every column, with typed sorting."""
+    """
+    Case-insensitive substring (or regex) filter across every column.
+
+    Sorting is handed to ResultTableModel, which does it in one pass instead
+    of a Python callback per comparison; this proxy always presents the
+    model's own order.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -325,35 +454,23 @@ class ResultFilterProxy(QSortFilterProxyModel):
                 self._regex = re.compile(text, re.IGNORECASE)
             except re.error:
                 self._regex = None
-        self.invalidateFilter()
+        self.invalidate()
 
     @property
     def filter_is_valid_regex(self) -> bool:
         return self._regex is not None
 
-    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
-        """
-        Compare on the model's typed key in Python.
-
-        Qt's own comparison goes through QVariant, which cannot order the
-        (present, value) tuples sort_key returns — they arrive as opaque
-        objects and compare arbitrarily, silently degrading every sort to the
-        display string.
-        """
+    def sort(self, column: int, order=Qt.SortOrder.AscendingOrder) -> None:
         model = self.sourceModel()
-        if model is None:
-            return super().lessThan(left, right)
-        return model.sort_key(left.row(), left.column()) < model.sort_key(
-            right.row(), right.column()
-        )
+        if isinstance(model, ResultTableModel):
+            model.sort(column, order)
+        else:
+            super().sort(column, order)
 
     def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
         if not self._needle and self._regex is None:
             return True
         model = self.sourceModel()
-        if model is None:
+        if not isinstance(model, ResultTableModel):
             return True
-        values = model.row_values(source_row)
-        if self._regex is not None:
-            return any(self._regex.search(v) for v in values)
-        return any(self._needle in v.lower() for v in values)
+        return model.row_matches(source_row, self._needle, self._regex)

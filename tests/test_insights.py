@@ -1,6 +1,6 @@
 """
 Automatic triage rules. Each rule is checked both ways: it fires on the
-compromised fixture host, and it stays quiet on a clean one — a triage engine
+compromised fixture host, and it stays quiet on a clean one: a triage engine
 that cries wolf trains examiners to ignore it.
 """
 import pytest

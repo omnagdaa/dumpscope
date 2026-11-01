@@ -2,6 +2,8 @@
 The RunGate: volatility3 processes run one at a time unless the examiner
 raises the limit, and a queued run can always be cancelled.
 """
+import lzma
+import os
 import threading
 import time
 
@@ -226,6 +228,70 @@ def test_solo_caps_limit_until_case_has_symbols(tmp_path):
     assert solo() and not awaiting_case_symbols([])
     assert gate.acquire(solo=solo)
     assert not gate.acquire(cancelled=lambda: True, solo=solo)
-    (sym / "windows" / "ntkrnlmp.pdb" / "ABC.json.xz").write_bytes(b"")
+    isf = sym / "windows" / "ntkrnlmp.pdb" / "ABC.json.xz"
+    # vol3 creates its output file before downloading the PDB, then streams
+    # into it for minutes. Neither state means the case has symbols yet.
+    isf.write_bytes(b"")
+    assert solo(), "an empty placeholder must keep runs serial"
+    full = lzma.compress(b'{"symbols": {}}')
+    isf.write_bytes(full[: len(full) // 2])
+    assert solo(), "a half-written xz stream must keep runs serial"
+    isf.write_bytes(full)
     assert not solo()
     assert gate.acquire(solo=solo)
+
+
+# ── Symbol files left behind by a killed run ─────────────────────────────────
+
+def _isf_dir(tmp_path):
+    folder = tmp_path / "symbols" / "windows" / "ntkrnlmp.pdb"
+    folder.mkdir(parents=True)
+    return folder
+
+
+def test_unfinished_isfs_are_discarded_and_finished_ones_kept(tmp_path):
+    from core.vol_runner import discard_partial_isfs
+    folder = _isf_dir(tmp_path)
+    full = lzma.compress(b'{"symbols": {}}')
+    (folder / "A-1.json.xz").write_bytes(full)
+    (folder / "B-1.json.xz").write_bytes(b"")                 # killed before writing
+    (folder / "C-1.json.xz").write_bytes(full[: len(full) // 2])   # killed mid-write
+    removed = discard_partial_isfs([str(tmp_path / "symbols")])
+    assert sorted(os.path.basename(p) for p in removed) == ["B-1.json.xz", "C-1.json.xz"]
+    assert sorted(os.listdir(folder)) == ["A-1.json.xz"]
+
+
+def test_a_run_on_a_case_without_symbols_clears_a_killed_runs_isf(qapp, stub_vol, tmp_path):
+    """The probe used to be killed mid-conversion and leave an empty ISF behind."""
+    folder = _isf_dir(tmp_path)
+    (folder / "X-1.json.xz").write_bytes(b"")
+    spec = RunSpec("/image.raw", "p", [str(tmp_path / "symbols")], ["--stub-mode", "rows"])
+    runner = VolatilityRunner(spec, gate=RunGate(1))
+    lines = []
+    runner.log_line.connect(lines.append)
+    loop = QEventLoop()
+    runner.run_finished.connect(lambda _code: loop.quit())
+    QTimer.singleShot(20000, loop.quit)
+    runner.start()
+    loop.exec()
+    assert runner.wait(10000)
+    assert not (folder / "X-1.json.xz").exists()
+    assert any("unfinished symbol file" in line for line in lines)
+
+
+def test_the_probe_allows_time_to_fetch_symbols_on_a_new_case(tmp_path, monkeypatch):
+    from core import os_detect
+    probe = os_detect.ImageProbe("/image.raw", [str(tmp_path / "symbols")])
+    seen = []
+
+    def guarded(_command, timeout):
+        seen.append(timeout)
+        return 1, "", ""
+
+    monkeypatch.setattr(probe, "_guarded", guarded)
+    probe._probe_windows("/image.raw")
+    folder = _isf_dir(tmp_path)
+    (folder / "A-1.json.xz").write_bytes(lzma.compress(b"{}"))
+    probe._probe_windows("/image.raw")
+    assert seen == [probe.INFO_TIMEOUT_FETCHING, probe.INFO_TIMEOUT]
+    assert probe.INFO_TIMEOUT_FETCHING >= 600

@@ -22,7 +22,7 @@ STUB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stub_vol.py")
 def test_case_symbol_args():
     assert case_symbol_args([], "") == []
     assert case_symbol_args(None) == []
-    assert case_symbol_args(["", None and "x"]) == []
+    assert case_symbol_args(["", None]) == []
     args = case_symbol_args(["/c/symbols", "/extra"], "/c/cache")
     assert args == ["-s", os.path.abspath("/c/symbols") + ";" + os.path.abspath("/extra"),
                     "--cache-path", os.path.abspath("/c/cache")]

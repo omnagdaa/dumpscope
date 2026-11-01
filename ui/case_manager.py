@@ -4,7 +4,7 @@ The launcher: pick up an existing investigation or start a new one.
 This is the screen the app opens on, and it exists because the previous flow
 had no way back into a case. Every launch pushed you through the new-case
 wizard, which meant work done yesterday could only be reached by pointing a
-fresh "new case" at the same folder — the behaviour that produced duplicate
+fresh "new case" at the same folder: the behaviour that produced duplicate
 case rows in the first place.
 """
 
@@ -23,7 +23,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ui.theme import build as build_theme, palette
+from ui import dialogs
+from ui.theme import build as build_theme, palette, plain
 from core.case import Case, CaseError, forget_case, load_recent, remember_case
 
 
@@ -118,12 +119,12 @@ class CaseManager(QDialog):
         super().__init__(parent)
         self.is_dark = is_dark
         self.selected_case: Case | None = None
-        self.setWindowTitle("DumpScope — Cases")
+        self.setWindowTitle("Cases - DumpScope")
         self.setMinimumSize(880, 560)
         self._build()
         self._load_recent()
         # The launcher opens before any main window exists, so nothing else has
-        # set an application stylesheet yet — without this the first screen an
+        # set an application stylesheet yet: without this the first screen an
         # examiner sees is the only unthemed one in the application.
         QApplication.instance().setStyleSheet(build_theme(dark=self.is_dark))
 
@@ -175,8 +176,8 @@ class CaseManager(QDialog):
         layout.addWidget(quick_btn)
         layout.addStretch()
 
-        hint = QLabel("A case is a folder. Move it, copy it, archive it — "
-                      "everything travels with it.")
+        hint = QLabel("Each case is a self-contained folder that can be moved, "
+                      "copied or archived.")
         hint.setWordWrap(True)
         hint.setObjectName("launcherHint")
         layout.addWidget(hint)
@@ -285,7 +286,9 @@ class CaseManager(QDialog):
                                 entry.get("examiner_name", ""), when) if m]
             item.setData(_CARD, {"name": entry.get("case_name", "Untitled"),
                                  "meta": "   ".join(meta), "path": detail})
-            item.setToolTip(f"{detail}\nLast opened: {when}" if when else detail)
+            # case.json is whatever the folder's author wrote; Qt renders
+            # tooltips as HTML.
+            item.setToolTip(plain(f"{detail}\nLast opened: {when}" if when else detail))
             if when:
                 item.setText(f"{label}     ·  {when}\n{detail}")
             self.recent_list.addItem(item)
@@ -342,7 +345,7 @@ class CaseManager(QDialog):
         try:
             case = Case.create(parent_dir, name.strip())
         except CaseError as exc:
-            QMessageBox.critical(self, "Could Not Create Case", str(exc))
+            dialogs.critical(self, "Could Not Create Case", str(exc))
             return
         remember_case(case)
         self._accept_case(case)
@@ -365,7 +368,7 @@ class CaseManager(QDialog):
         try:
             case = Case.open(directory)
         except CaseError as exc:
-            answer = QMessageBox.question(
+            answer = dialogs.question(
                 self, "Not a Case Folder",
                 f"{exc}\n\nRemove it from the recent list?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

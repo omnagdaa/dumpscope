@@ -2,8 +2,8 @@
 Automatic triage of stored plugin output.
 
 Each rule encodes one thing an experienced examiner checks by eye on a Windows
-image — a process hidden from the active list, an svchost.exe whose parent is
-not services.exe, a PowerShell command line carrying an encoded payload — and
+image (a process hidden from the active list, an svchost.exe whose parent is
+not services.exe, a PowerShell command line carrying an encoded payload) and
 reports it as a Finding with a severity and the evidence behind it.
 
 These are leads, not verdicts. Every finding says which plugin output it came
@@ -16,6 +16,8 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections import defaultdict
+from collections.abc import Mapping
+from functools import lru_cache
 from dataclasses import dataclass, field
 
 SEVERITIES = ("high", "medium", "low", "info")
@@ -90,15 +92,43 @@ def _rows(payload: dict) -> list[dict[str, str]]:
     return out
 
 
-def _by_plugin(payloads: list[dict]) -> dict[str, list[dict[str, str]]]:
-    tables: dict[str, list[dict[str, str]]] = {}
-    for payload in payloads or []:
-        if not isinstance(payload, dict):
-            continue
-        key = _suffix(str(payload.get("plugin") or ""))
-        # The newest run wins; payloads arrive newest first from the database.
-        tables.setdefault(key, _rows(payload))
-    return tables
+class _Tables(Mapping):
+    """
+    Stored payloads by plugin suffix, as lists of row dicts.
+
+    A row becomes a dict only when a rule asks for its table. Most of what a
+    case stores (handles, filescan, hundreds of thousands of rows) is read
+    by no rule, and converting all of it up front was most of the cost of
+    every insights rebuild.
+    """
+
+    def __init__(self, payloads: list[dict]):
+        self._payloads: dict[str, dict] = {}
+        self._converted: dict[str, list[dict[str, str]]] = {}
+        for payload in payloads or []:
+            if not isinstance(payload, dict):
+                continue
+            key = _suffix(str(payload.get("plugin") or ""))
+            # The newest run wins; payloads arrive newest first from the database.
+            self._payloads.setdefault(key, payload)
+
+    def __getitem__(self, key: str) -> list[dict[str, str]]:
+        if key not in self._converted:
+            self._converted[key] = _rows(self._payloads[key])
+        return self._converted[key]
+
+    def __contains__(self, key) -> bool:
+        return key in self._payloads
+
+    def __iter__(self):
+        return iter(self._payloads)
+
+    def __len__(self) -> int:
+        return len(self._payloads)
+
+
+def _by_plugin(payloads: list[dict]) -> Mapping[str, list[dict[str, str]]]:
+    return _Tables(payloads)
 
 
 def _processes(tables) -> dict[str, _Proc]:
@@ -232,10 +262,11 @@ _SUSPICIOUS_PORTS = {4444: "Metasploit default", 1337: "common backdoor",
                      9050: "Tor SOCKS"}
 
 
+@lru_cache(maxsize=4096)                 # process names repeat; the distance is slow in Python
 def _edit_distance_one(a: str, b: str) -> bool:
     """
     True when a and b are exactly one edit apart, counting an adjacent
-    transposition as one edit ("scvhost" vs "svchost") — the commonest
+    transposition as one edit ("scvhost" vs "svchost"): the commonest
     lookalike trick, which plain Levenshtein distance scores as two.
     """
     if a == b or abs(len(a) - len(b)) > 1:
@@ -276,7 +307,7 @@ def _hidden_processes(procs, tables):
                 "high", "Hidden process",
                 f"{proc.name or 'PID ' + proc.pid} is not in the active process list",
                 "Found by psscan's pool scan but missing from pslist's linked list "
-                "while still running — the signature of DKOM unlinking.",
+                "while still running, which is the signature of DKOM unlinking.",
                 proc.pid, proc.name, "windows.psscan.PsScan",
                 (("PPID", proc.ppid), ("Created", proc.create)),
             ))
@@ -315,7 +346,7 @@ def _singletons(procs, tables):
         if not proc.exit and proc.name.lower() in _SINGLETONS:
             running[proc.name.lower()].append(proc)
     out = []
-    for name, group in running.items():
+    for group in running.values():
         # smss.exe spawns a child copy per session that exits; only running
         # duplicates are odd, and for smss only beyond the master instance.
         if len(group) > 1:
@@ -450,7 +481,8 @@ def _injection(procs, tables):
         name = regions[0].get("Process", "") or procs.get(pid, _Proc(pid)).name
         out.append(Finding(
             "high" if pe or rwx else "medium", "Code injection",
-            f"{len(regions)} suspicious memory region(s) in {name or 'PID ' + pid}",
+            f"{len(regions)} suspicious memory region{'' if len(regions) == 1 else 's'} "
+            f"in {name or 'PID ' + pid}",
             ("An executable (MZ) image sits in private memory. "
              if pe else "") + ("Pages are writable and executable. " if rwx else "")
             + "Dump the regions with malfind --dump and scan them.",
@@ -535,6 +567,166 @@ def counts(findings: list[Finding]) -> dict[str, int]:
     for finding in findings:
         tally[finding.severity] = tally.get(finding.severity, 0) + 1
     return tally
+
+
+# ── What each check does, in plain words ─────────────────────────────────────
+
+@dataclass(frozen=True)
+class Rule:
+    id: str
+    name: str
+    categories: tuple[str, ...]      # Finding.category values this rule produces
+    checks: str                      # what it looks at
+    why: str                         # why an examiner should care
+    verify: str                      # how to confirm or dismiss it
+    noise: str                       # common innocent causes
+    attack: tuple[tuple[str, str], ...]   # MITRE ATT&CK (id, name)
+    inputs: tuple[str, ...]          # plugins it needs; any one of a "|" group
+
+
+RULES: tuple[Rule, ...] = (
+    Rule("hidden", "Hidden processes", ("Hidden process",),
+         "Compares two ways of finding processes: the kernel's active process list "
+         "(Process List) and a scan of all memory for process structures (Process "
+         "Scan). A process the scan finds still running, but the list does not "
+         "contain, has been cut out of the list.",
+         "Rootkits unlink their process from the list so Task Manager and most "
+         "tools never show it.",
+         "Open Process Scan and find the PID. Check its parent, its path (DLL List) "
+         "and its command line, then dump the process and scan it.",
+         "A process that exited just before the capture can be found only by the "
+         "scan. If it has an exit time, it is not hidden.",
+         (("T1014", "Rootkit"), ("T1564", "Hide Artifacts")),
+         ("windows.pslist.PsList", "windows.psscan.PsScan")),
+    Rule("parent", "Unexpected parents", ("Unexpected parent",),
+         "Core Windows processes are always started by the same parent: lsass.exe "
+         "by wininit.exe, svchost.exe by services.exe, and so on. Flags one whose "
+         "parent is still running and is not the expected one.",
+         "A fake svchost.exe or lsass.exe started by something else breaks this "
+         "chain, and it is one of the quickest tells on a compromised host.",
+         "Look at the Process Tree. Compare the binary's path and command line "
+         "with the same process on a known-good machine.",
+         "Some security products start svchost-like helpers of their own.",
+         (("T1036", "Masquerading"), ("T1055", "Process Injection")),
+         ("windows.pslist.PsList",)),
+    Rule("singleton", "Duplicate system processes", ("Duplicate system process",),
+         "lsass.exe, services.exe, wininit.exe, lsaiso.exe and smss.exe each run "
+         "exactly once on a booted system. Flags a second running copy.",
+         "A second lsass.exe is a classic way to harvest credentials or to hide "
+         "behind a trusted name.",
+         "Compare the path, parent and start time of every copy. The real one "
+         "runs from System32 and was started at boot.",
+         "None for these names on a normal system.",
+         (("T1036.005", "Match Legitimate Name or Location"),),
+         ("windows.pslist.PsList",)),
+    Rule("lookalike", "Lookalike names", ("Masquerading name",),
+         "Compares every process name with critical Windows names. A name one "
+         "typo away (a letter added, removed, changed, or two letters swapped, "
+         "as in scvhost.exe) is flagged.",
+         "Malware picks names that pass a quick glance down a process list.",
+         "Check where the binary runs from and who started it; hash it and look "
+         "it up.",
+         "Rare. Some legitimate tools have similar short names.",
+         (("T1036.005", "Match Legitimate Name or Location"),),
+         ("windows.pslist.PsList",)),
+    Rule("location", "Wrong or risky locations",
+         ("System binary in the wrong place", "Suspicious location"),
+         "Reads each process's executable path from DLL List. A Windows system "
+         "binary running outside System32, or any program running from a temp "
+         "folder, Downloads, the Public profile, the Recycle Bin or a network "
+         "share, is flagged.",
+         "Droppers and second stages are written to user-writable folders; a "
+         "system name in one of them is almost always malicious.",
+         "Check the file's hash and signature. Look for how it got there: "
+         "Downloads, an email attachment, a script.",
+         "Installers and updaters often run from temp folders for a short time.",
+         (("T1036.005", "Match Legitimate Name or Location"),
+          ("T1204", "User Execution")),
+         ("windows.dlllist.DllList",)),
+    Rule("cmdline", "Suspicious command lines", ("Suspicious command line",),
+         f"Matches every command line against {len(_CMDLINE_RULES)} patterns attackers "
+         "rely on: encoded or hidden PowerShell, download cradles, certutil and "
+         "bitsadmin downloads, script hosts running remote code, shadow-copy "
+         "deletion, new accounts, Run-key persistence and credential-dumping "
+         "tools.",
+         "These are the commands that download, run and hide an intrusion's "
+         "tooling; the command line is often the only record of what ran.",
+         "Decode any encoded PowerShell and read it. Check the parent process and "
+         "what it connected to (Net Scan).",
+         "Admin scripts and management agents use some of the same switches.",
+         (("T1059.001", "PowerShell"), ("T1105", "Ingress Tool Transfer"),
+          ("T1490", "Inhibit System Recovery"), ("T1003", "OS Credential Dumping")),
+         ("windows.cmdline.CmdLine",)),
+    Rule("network", "Unusual network use", ("Unusual network activity", "Suspicious port"),
+         "Reads the connections from Net Scan. Flags connections owned by "
+         "programs that seldom need the network (Office, script hosts, "
+         "PowerShell, lsass.exe and others) and connections on ports known for "
+         "backdoors, such as 4444.",
+         "A document or script host talking to the internet is how many "
+         "intrusions call home.",
+         "Look up the remote address; check when the connection was made "
+         "against the Timeline.",
+         "Office and PowerShell do make legitimate connections (updates, "
+         "add-ins, admin scripts).",
+         (("T1071", "Application Layer Protocol"), ("T1571", "Non-Standard Port")),
+         ("windows.netscan.NetScan|windows.netstat.NetStat",)),
+    Rule("injection", "Injected code", ("Code injection",),
+         "Reads Malfind, which lists private memory that is executable but not "
+         "backed by a file on disk. Raised to high when the region is writable "
+         "and executable, or starts with an executable (MZ) header.",
+         "Injected shellcode and reflectively loaded DLLs live in exactly this "
+         "kind of memory.",
+         "Dump the region (Malfind with --dump) and scan it with YARA or an "
+         "antivirus engine; look at the first bytes for code.",
+         "Programs with a just-in-time compiler (browsers, .NET, Java) create "
+         "such memory legitimately.",
+         (("T1055", "Process Injection"),),
+         ("windows.malware.malfind.Malfind",)),
+    Rule("service", "Suspicious services", ("Suspicious service",),
+         "Reads the services from Service Scan. Flags a service whose binary "
+         "lives in a user-writable folder or which launches a script host "
+         "(cmd, PowerShell, mshta, rundll32).",
+         "A service survives reboots and runs as SYSTEM, which makes it a "
+         "favourite persistence mechanism.",
+         "Check the service's binary, its creation in the registry and the "
+         "System event log.",
+         "Some vendors install services under ProgramData.",
+         (("T1543.003", "Windows Service"),),
+         ("windows.svcscan.SvcScan",)),
+    Rule("credentials", "Credential material", ("Credential material",),
+         "Reports when hashdump, lsadump or cachedump recovered password hashes "
+         "or secrets.",
+         "Recovered hashes are sensitive evidence and show what an attacker "
+         "with this memory could have taken.",
+         "Handle under your evidence rules; crack offline only if authorised.",
+         "Not a sign of compromise by itself.",
+         (("T1003", "OS Credential Dumping"),),
+         ("windows.hashdump.Hashdump|windows.lsadump.Lsadump|windows.cachedump.Cachedump",)),
+)
+_RULE_BY_CATEGORY = {category: rule for rule in RULES for category in rule.categories}
+
+
+def rule_for(finding: Finding) -> Rule | None:
+    """The check that produced `finding`."""
+    return _RULE_BY_CATEGORY.get(finding.category)
+
+
+def rule_status(available_plugins: set[str], findings: list[Finding]):
+    """
+    [(rule, ran, findings it produced, plugins still missing)] for the
+    "How Insights work" panel. A rule ran when all of its inputs are present.
+    """
+    have = {_suffix(p) for p in available_plugins}
+    out = []
+    for rule in RULES:
+        missing = []
+        for group in rule.inputs:
+            options = group.split("|")
+            if not any(_suffix(option) in have for option in options):
+                missing.append(options[0])
+        produced = sum(1 for f in findings if f.category in rule.categories)
+        out.append((rule, not missing, produced, missing))
+    return out
 
 
 def missing_inputs(available_plugins: set[str]) -> list[str]:

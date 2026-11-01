@@ -1,7 +1,7 @@
 """
 The command palette: everything the application can do, from the keyboard.
 
-A forensics tool accumulates verbs — run one of two hundred plugins, switch the
+A forensics tool accumulates verbs: run one of two hundred plugins, switch the
 plugin set to another OS, tag a row, export, re-identify the image. Menus scale
 badly past about thirty of those, and a ribbon only shows what fits on one row.
 The palette is the flat index over all of it: press Ctrl+Shift+P, type three
@@ -17,7 +17,7 @@ accident.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from collections.abc import Callable
 
 from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
 from PyQt6.QtWidgets import (

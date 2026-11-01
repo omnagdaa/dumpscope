@@ -32,11 +32,12 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable
+from collections.abc import Callable
 
 from core import insights as insight_rules
+from core import memory_map
 from core import timeline as timeline_rules
-from core.report import DEFAULT_MAX_ROWS, build_html, build_json
+from core.report import DEFAULT_MAX_ROWS, build_html, build_json, tool_versions
 
 log = logging.getLogger("dumpscope.report_bundle")
 
@@ -250,6 +251,8 @@ def _build(case, db, folder, options, result, report, stop):
     timelines: list[tuple[str, list]] = []
     timeline_links: dict[str, str] = {}
     findings_all = []
+    memory: list[tuple[str, list]] = []
+    moments: dict[str, list] = {}
     for source_id, latest in _latest_by_source(results).items():
         label = _source_label(by_id.get(source_id))
         payloads = []
@@ -258,7 +261,13 @@ def _build(case, db, folder, options, result, report, stop):
             if payload:
                 payloads.append(dict(payload, plugin=run["plugin"]))
         events = timeline_rules.build_events(payloads)
+        findings = insight_rules.analyse(payloads)
+        usage = memory_map.latest_payload(payloads)
+        if usage:
+            memory.append((label, memory_map.programs_from_payload(usage)))
         if events:
+            moments[label] = timeline_rules.key_moments(
+                events, findings, timeline_rules.capture_time(payloads))
             relative = os.path.join("timeline", f"{_safe(label, 'source')}.csv")
             while os.path.exists(os.path.join(folder, relative)):
                 relative = relative[:-4] + "_.csv"
@@ -269,8 +278,7 @@ def _build(case, db, folder, options, result, report, stop):
             timeline_links[label] = relative
             files[relative] = f"Timeline for {label}"
             result.events += len(events)
-        for finding in insight_rules.analyse(payloads):
-            findings_all.append(finding)
+        findings_all.extend(findings)
     result.insights = len(findings_all)
 
     insights_rel = ""
@@ -325,7 +333,7 @@ def _build(case, db, folder, options, result, report, stop):
         include_audit=options.include_audit, extractions=extractions,
         outputs=outputs if options.include_output else None,
         max_rows=options.max_rows, insights=findings_all, timelines=timelines,
-        links=links,
+        links=links, memory=memory, moments=moments, versions=tool_versions(),
     )
     with open(os.path.join(folder, "index.html"), "w", encoding="utf-8") as handle:
         handle.write(html)
@@ -405,7 +413,7 @@ def _write_manifest(folder, result, report, stop):
 
 
 def _readme(case, result: BundleResult) -> str:
-    return f"""DumpScope case report — {case.case_name}
+    return f"""DumpScope case report: {case.case_name}
 {'=' * (26 + len(case.case_name))}
 
 Open index.html in any browser. It needs no network and no other software.

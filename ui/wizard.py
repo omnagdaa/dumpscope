@@ -6,11 +6,14 @@ from PyQt6.QtWidgets import (
     QTextEdit, QGroupBox, QGridLayout, QFrame, QProgressBar,
     QApplication, QSizePolicy
 )
+from ui import icons
+from ui.theme import palette, plain_label
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import (
     QDragEnterEvent, QDropEvent, QPainter,
 )
 from PyQt6.QtWidgets import QStyle, QStyleOption
+from ui import dialogs
 from ui.theme import build as build_theme, restyle
 from core.case import Case, CaseError, remember_case
 from core.hash_worker import HashWorker
@@ -92,19 +95,20 @@ class DropZone(QWidget):
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.setSpacing(10)
 
-        self.icon_lbl = QLabel("🗂️")
+        self.icon_lbl = QLabel()
         self.icon_lbl.setObjectName("dropIcon")
         self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._set_glyph("download", "text_dim")
 
-        self.main_lbl = QLabel("Drag & Drop Memory Image Here")
+        self.main_lbl = QLabel("Drop a memory image here")
         self.main_lbl.setObjectName("dropTitle")
         self.main_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.sub_lbl = QLabel("or click to browse files (.raw, .mem, .vmem, .dmp, .img)")
+        self.sub_lbl = QLabel("or click to browse (.raw, .mem, .vmem, .dmp, .img)")
         self.sub_lbl.setObjectName("dropSubtitle")
         self.sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.file_lbl = QLabel("")
+        self.file_lbl = plain_label("")
         self.file_lbl.setObjectName("dropFile")
         self.file_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.file_lbl.setWordWrap(True)
@@ -113,6 +117,12 @@ class DropZone(QWidget):
         layout.addWidget(self.main_lbl)
         layout.addWidget(self.sub_lbl)
         layout.addWidget(self.file_lbl)
+
+    def _set_glyph(self, name: str, role: str):
+        dark = self.palette().window().color().lightness() < 128
+        self.icon_lbl.setPixmap(icons.pixmap(
+            name, size=32, color=palette(dark)[role],
+            ratio=self.devicePixelRatioF()))
 
     def _update_style(self, hover=False):
         state = "loaded" if self.file_path else ("hover" if hover else "idle")
@@ -133,9 +143,10 @@ class DropZone(QWidget):
         fname = os.path.basename(path)
         size = os.path.getsize(path)
         size_str = self._human_size(size)
-        self.file_lbl.setText(f"✓  {fname}  ({size_str})")
-        self.main_lbl.setText("Memory Image Loaded")
-        self.icon_lbl.setText("✅")
+        self.file_lbl.setText(f"{fname}  ({size_str})")
+        self.main_lbl.setText("Memory image selected")
+        self.sub_lbl.setText("Click or drop another file to replace it")
+        self._set_glyph("file", "ok")
         self._update_style(False)
         self.file_dropped.emit(path)
 
@@ -173,7 +184,7 @@ class DropZone(QWidget):
 class CaseWizard(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("DumpScope — New Case")
+        self.setWindowTitle("New Case - DumpScope")
         self.setMinimumSize(680, 600)
         self.resize(720, 650)
         self.is_dark = True
@@ -248,7 +259,7 @@ class CaseWizard(QDialog):
         self.next_btn.setFixedWidth(100)
         self.next_btn.clicked.connect(self.go_next)
 
-        self.finish_btn = QPushButton("✓  Finish")
+        self.finish_btn = QPushButton("Create Case")
         self.finish_btn.setObjectName("primaryBtn")
         self.finish_btn.setFixedWidth(120)
         self.finish_btn.clicked.connect(self.finish)
@@ -373,6 +384,7 @@ class CaseWizard(QDialog):
 
         layout.addWidget(self._field_label("Notes"))
         self.notes = QTextEdit()
+        self.notes.setAcceptRichText(False)
         self.notes.setPlaceholderText("Add any additional case notes here...")
         self.notes.setMaximumHeight(130)
         layout.addWidget(self.notes)
@@ -432,31 +444,55 @@ class CaseWizard(QDialog):
     def _on_image_loaded(self, path):
         self.md5_edit.setText("Computing...")
         self.sha256_edit.setText("Computing...")
-        self.hash_status.setText("Calculating hashes — please wait...")
+        self.hash_status.setText("Calculating hashes...")
         self.hash_progress.setVisible(True)
         self.finish_btn.setEnabled(False)
 
-        self._hash_worker = HashWorker(path)
-        self._hash_worker.hashes_ready.connect(self._on_hashes_done)
-        self._hash_worker.error.connect(self._on_hash_error)
-        self._hash_worker.start()
+        # Choosing another image while the first is still hashing used to drop
+        # the only reference to a running QThread (which aborts the process)
+        # and let the first image's digests land late on the second's record.
+        self._stop_hashing()
+        worker = HashWorker(path, parent=self)
+        worker.hashes_ready.connect(
+            lambda md5, sha256, w=worker: self._on_hashes_done(md5, sha256, w))
+        worker.error.connect(lambda msg, w=worker: self._on_hash_error(msg, w))
+        self._hash_worker = worker
+        worker.start()
 
-    def _on_hashes_done(self, md5, sha256):
+    def _stop_hashing(self):
+        worker, self._hash_worker = self._hash_worker, None
+        if worker is not None:
+            worker.cancel()
+            worker.wait()
+
+    def done(self, result):
+        """Accept, reject and close all end here; none may leave a hash running."""
+        self._stop_hashing()
+        super().done(result)
+
+    def closeEvent(self, event):
+        self._stop_hashing()
+        super().closeEvent(event)
+
+    def _on_hashes_done(self, md5, sha256, worker=None):
+        if worker is not None and worker is not self._hash_worker:
+            return                       # digests of an image no longer chosen
         self.md5_edit.setText(md5)
         self.sha256_edit.setText(sha256)
-        self.hash_status.setText("✓  Hashes computed successfully.")
+        self.hash_status.setText("Hashes computed.")
         self.hash_progress.setVisible(False)
         self.finish_btn.setEnabled(True)
 
-    def _on_hash_error(self, msg):
+    def _on_hash_error(self, msg, worker=None):
+        if worker is not None and worker is not self._hash_worker:
+            return
         self.hash_status.setText(f"Error: {msg}")
         self.hash_progress.setVisible(False)
 
     def go_next(self):
         idx = self.stack.currentIndex()
-        if idx == 0:
-            if not self._validate_case():
-                return
+        if idx == 0 and not self._validate_case():
+            return
         if idx < self.stack.count() - 1:
             self.stack.setCurrentIndex(idx + 1)
             self.step_indicator.set_step(idx + 1)
@@ -485,8 +521,7 @@ class CaseWizard(QDialog):
         if not self.base_dir.text().strip():
             missing.append("Base Directory")
         if missing:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(
+            dialogs.warning(
                 self, "Required Fields",
                 "Please fill in:\n• " + "\n• ".join(missing)
             )
@@ -497,8 +532,8 @@ class CaseWizard(QDialog):
         """
         Create the case folder, then close.
 
-        Creation happens here rather than after the dialog closes so a failure —
-        an unwritable parent directory, a case of this name already there — can
+        Creation happens here rather than after the dialog closes so a failure
+        (an unwritable parent directory, a case of this name already there) can
         be reported while the fields are still on screen and editable.
         """
         parent_dir = self.base_dir.text().strip()
@@ -519,8 +554,7 @@ class CaseWizard(QDialog):
                 is_dark=self.is_dark,
             )
         except CaseError as exc:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "Could Not Create Case", str(exc))
+            dialogs.warning(self, "Could Not Create Case", str(exc))
             return
 
         remember_case(self._case)

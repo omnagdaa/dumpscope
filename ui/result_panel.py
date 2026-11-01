@@ -11,11 +11,13 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QKeySequence
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar,
+    QHeaderView, QLabel, QLineEdit, QMenu, QProgressBar,
     QPlainTextEdit, QPushButton, QSizePolicy, QStackedWidget, QTableView,
     QVBoxLayout, QWidget,
 )
+from ui.theme import plain_label
 
+from ui import dialogs
 from core.report_bundle import write_csv
 from ui import icons
 from ui.result_model import ResultFilterProxy, ResultTableModel
@@ -37,6 +39,8 @@ COLUMN_WIDTHS = {
     "Value": 260, "Variable": 180, "Type": 110, "Tag": 90,
 }
 _MIN_WIDTH, _MAX_WIDTH = 70, 340
+# How long the filter box waits after the last keystroke before re-filtering.
+FILTER_DELAY_MS = 180
 
 
 class ResultPanel(QWidget):
@@ -55,7 +59,7 @@ class ResultPanel(QWidget):
         super().__init__(parent)
         self.plugin_name = plugin_name
         self.plugin_id = plugin_id
-        # Distinguishes two tabs running the same plugin — a listing and an
+        # Distinguishes two tabs running the same plugin: a listing and an
         # extraction started from it. Set by MainWindow when a runner attaches.
         self.run_key = plugin_id
         self._running = False
@@ -95,7 +99,7 @@ class ResultPanel(QWidget):
         self.status_dot.setObjectName("statusDot")
         self.status_dot.setProperty("state", "running")
 
-        self.title_lbl = QLabel(self.plugin_name)
+        self.title_lbl = plain_label(self.plugin_name)
         self.title_lbl.setObjectName("panelTitle")
 
         self.progress = QProgressBar()
@@ -105,7 +109,7 @@ class ResultPanel(QWidget):
         self.progress.setRange(0, 100)
         self.progress.setVisible(False)
 
-        self.stage_lbl = QLabel("")
+        self.stage_lbl = plain_label("")
         self.stage_lbl.setObjectName("panelStage")
         self.stage_lbl.setMinimumWidth(0)
         self.stage_lbl.setSizePolicy(QSizePolicy.Policy.Ignored,
@@ -119,7 +123,14 @@ class ResultPanel(QWidget):
         self.filter_box.setClearButtonEnabled(True)
         self.filter_box.setFixedWidth(190)
         self.filter_box.setFixedHeight(28)
-        self.filter_box.textChanged.connect(self._apply_filter)
+        # Typing re-filters every row; on a six-figure table doing that per
+        # keystroke made the box lag behind the typist. Wait for a pause.
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(FILTER_DELAY_MS)
+        self._filter_timer.timeout.connect(
+            lambda: self._apply_filter(self.filter_box.text()))
+        self.filter_box.textChanged.connect(lambda _text: self._filter_timer.start())
 
         self.regex_chk = QCheckBox(".*")
         self.regex_chk.setToolTip("Treat the filter as a regular expression")
@@ -193,7 +204,7 @@ class ResultPanel(QWidget):
 
         Two reasons it starts off. Enabling sorting immediately makes the view
         sort by column 0 straight away, which scrambles output whose emitted
-        order carries meaning — pstree's parents and children are only adjacent
+        order carries meaning: pstree's parents and children are only adjacent
         in vol3's own ordering. And while a plugin is still streaming, a sorted
         proxy re-sorts on every batch, which on a plugin emitting six figures
         of rows costs far more than the sort is worth.
@@ -241,6 +252,10 @@ class ResultPanel(QWidget):
         for index, name in enumerate(self.model.columns):
             width = COLUMN_WIDTHS.get(name, len(name) * 10 + 30)
             self.table.setColumnWidth(index, max(_MIN_WIDTH, min(width, _MAX_WIDTH)))
+            # The memory plugin's icons are base64 for the Memory Usage map, not
+            # something to read in a table cell. Exports still include them.
+            self.table.setColumnHidden(
+                index, name == "Icon" and self.plugin_id.startswith("dumpscope."))
 
     def append_rows(self, rows: list[list[str]]):
         self.model.append_rows(rows)
@@ -263,7 +278,7 @@ class ResultPanel(QWidget):
             return
         self.progress.setVisible(False)
         self.stage_lbl.setText(
-            f"Queued — waiting for {ahead} other run{'s' if ahead != 1 else ''} to finish"
+            f"Queued: waiting for {ahead} other run{'s' if ahead != 1 else ''} to finish"
         )
 
     def _update_row_count(self):
@@ -318,6 +333,7 @@ class ResultPanel(QWidget):
     # ── Filter / view ─────────────────────────────────────────────────────────
 
     def _apply_filter(self, text: str):
+        self._filter_timer.stop()
         use_regex = self.regex_chk.isChecked()
         self.proxy.set_filter(text, use_regex=use_regex)
         invalid = use_regex and text.strip() and not self.proxy.filter_is_valid_regex
@@ -339,7 +355,7 @@ class ResultPanel(QWidget):
         # The row is read out *now*, not captured as a QModelIndex. exec() below
         # runs a nested event loop and rows keep streaming in during it, so an
         # index captured beforehand can be pointing at a different line by the
-        # time an action fires — which would silently tag the wrong evidence.
+        # time an action fires: which would silently tag the wrong evidence.
         column = (self.model.columns[index.column()]
                   if index.column() < len(self.model.columns) else "")
         row = self.model.row_dict(self.proxy.mapToSource(index).row())
@@ -447,6 +463,7 @@ class ResultPanel(QWidget):
 
         if self.filter_box.text():
             self.filter_box.clear()
+            self._apply_filter("")
 
         proxy_index = self.proxy.mapFromSource(self.model.index(target, 0))
         if not proxy_index.isValid():
@@ -498,7 +515,7 @@ class ResultPanel(QWidget):
             self.export_to(path, "json" if path.lower().endswith(".json")
                            else "tsv" if path.lower().endswith(".tsv") else "csv")
         except OSError as exc:
-            QMessageBox.critical(self, "Export Failed", str(exc))
+            dialogs.critical(self, "Export Failed", str(exc))
             return
         self.append_log(f"Exported {self.proxy.rowCount():,} rows to {path}")
 
@@ -524,6 +541,8 @@ class ResultPanel(QWidget):
         return {
             "plugin": self.plugin_id or self.plugin_name,
             "columns": self.model.columns,
-            "rows": [self.model.row_values(r) for r in range(self.model.rowCount())],
+            # Emitted order, not the view's: pstree's order carries meaning,
+            # and a header click must not change what the case stores.
+            "rows": self.model.emitted_rows(),
         }
 

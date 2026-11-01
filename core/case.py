@@ -16,7 +16,7 @@ A case is a folder, not a loose collection of settings:
         logs/
 
 Keeping `case.json` alongside the database means a case survives being moved,
-copied to another machine, or archived — the folder is the unit of work. The
+copied to another machine, or archived: the folder is the unit of work. The
 database holds everything queryable; the JSON holds the identity, so a case can
 still be listed and opened even if the database is locked or damaged.
 """
@@ -28,7 +28,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from core.paths import config_dir
 
@@ -60,7 +60,7 @@ def safe_dirname(name: str) -> str:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 class CaseError(Exception):
@@ -133,7 +133,7 @@ class Case:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     @classmethod
-    def create(cls, parent_dir: str, case_name: str, **fields) -> "Case":
+    def create(cls, parent_dir: str, case_name: str, **fields) -> Case:
         """
         Make a new case folder under `parent_dir`.
 
@@ -163,7 +163,7 @@ class Case:
         return case
 
     @classmethod
-    def open(cls, directory: str) -> "Case":
+    def open(cls, directory: str) -> Case:
         """Load a case from its folder."""
         directory = os.path.abspath(directory)
         path = os.path.join(directory, CASE_FILE)
@@ -172,6 +172,8 @@ class Case:
         try:
             with open(path, encoding="utf-8") as handle:
                 data = json.load(handle)
+            # A \ud83d escape decodes to text that SQLite and every report file reject.
+            json.dumps(data, ensure_ascii=False).encode("utf-8")
         except (OSError, ValueError, RecursionError) as exc:   # incl. nested-JSON bomb
             raise CaseError(f"The case file could not be read:\n{exc}") from exc
         if not isinstance(data, dict):
@@ -198,7 +200,7 @@ class Case:
         return case
 
     @classmethod
-    def quick(cls, directory: str | None = None) -> "Case":
+    def quick(cls, directory: str | None = None) -> Case:
         """A throwaway case for analysis with no record-keeping."""
         return cls(
             directory=directory or os.path.expanduser("~"),
@@ -241,7 +243,7 @@ class Case:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Case":
+    def from_dict(cls, data: dict) -> Case:
         known = {f for f in cls.__dataclass_fields__}
         payload = {k: v for k, v in data.items() if k in known}
         payload["directory"] = data.get("directory") or data.get("base_dir") or "."

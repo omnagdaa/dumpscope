@@ -2,8 +2,8 @@
 A single tile on the plugin ribbon.
 
 Appearance is now entirely stylesheet-driven. The tile carries two dynamic
-properties the theme reads back — ``state`` (idle / running / disabled) and
-``density`` — instead of rebuilding an inline stylesheet on every state change.
+properties the theme reads back, ``state`` (idle / running / disabled) and
+``density``, instead of rebuilding an inline stylesheet on every state change.
 That matters beyond tidiness: an inline stylesheet takes precedence over the
 application stylesheet, so the old tiles could not be re-themed at all, and
 toggling the theme left forty-nine hardcoded dark tiles on a light window.
@@ -75,6 +75,8 @@ class PluginButton(QWidget):
 
     def _tooltip(self) -> str:
         parts = [f"<b>{self.info.short_name}</b>", f"<code>{self.info.id}</code>"]
+        if getattr(self, "_running", False):
+            parts.append("<i>Running</i>")
         if self.info.description:
             parts.append(self.info.description)
         if self.info.needs_input:
@@ -98,14 +100,14 @@ class PluginButton(QWidget):
         self._paint_glyph()
         self.name_lbl.setWordWrap(wrap)
         self.name_lbl.setText(self._wrapped_name())
-        self.badge_lbl.setVisible(self._density == "comfortable" or self._running)
+        self._show_badge()
         self.setProperty("density", self._density)
         restyle(self)
 
     def _wrapped_name(self) -> str:
         """
         Break at the first space so tiles stay a uniform height. Elision was
-        tried instead and read badly — half the Windows ribbon came out as
+        tried instead and read badly: half the Windows ribbon came out as
         "Process Li…" / "Process Sc…" / "Command Li…", which is exactly the
         part of the name that distinguishes them.
         """
@@ -122,14 +124,20 @@ class PluginButton(QWidget):
         self.setProperty("state", "running" if running else "idle")
         self._paint_glyph()
         self._update_badge()
-        self.badge_lbl.setVisible(self._density == "comfortable" or running)
+        self._show_badge()
         restyle(self)
+
+    def _show_badge(self):
+        # A compact tile has no room for a third line under a two-line name;
+        # the highlighted tile and its tooltip say it is running instead.
+        self.badge_lbl.setVisible(self._density == "comfortable")
+        self.setToolTip(self._tooltip())
 
     def _update_badge(self):
         if self._running:
-            self.badge_lbl.setText("running…")
+            self.badge_lbl.setText("Running")
         elif self.info.needs_input:
-            self.badge_lbl.setText("needs input")
+            self.badge_lbl.setText("Needs input")
         else:
             self.badge_lbl.setText("")
 
@@ -148,7 +156,7 @@ class PluginButton(QWidget):
 
     def paintEvent(self, event):
         """
-        A bare QWidget subclass does not paint its own stylesheet background —
+        A bare QWidget subclass does not paint its own stylesheet background:
         Qt only does that for the widget classes it knows. Without this the
         tiles' background, border and rounded corners are all silently dropped
         and the ribbon renders as flat text on the window colour.

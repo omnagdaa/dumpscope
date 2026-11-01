@@ -1,4 +1,4 @@
-"""Data sources, tags and bookmarks — the case-management layer of the database."""
+"""Data sources, tags and bookmarks: the case-management layer of the database."""
 
 import pytest
 
@@ -72,7 +72,7 @@ def test_bookmarks_resolve_their_tag_colour(db):
 
 def test_removing_a_source_keeps_the_work_done_from_it(db, tmp_path):
     """
-    Detaching an image must never destroy analysis already performed — that is
+    Detaching an image must never destroy analysis already performed: that is
     evidence of work, and losing it silently would be worse than keeping an
     orphaned row.
     """

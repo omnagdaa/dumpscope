@@ -77,7 +77,7 @@ def test_naive_sequential_read_really_does_deadlock(stub_vol):
     once stderr fills its pipe buffer.
 
     The naive reader gets its own process group and its output goes to
-    /dev/null. Killing it alone is not enough — the stub it spawned would
+    /dev/null. Killing it alone is not enough: the stub it spawned would
     outlive it still holding the pipes, and waiting on those never returns.
     """
     naive = (
@@ -184,3 +184,8 @@ class TestFindingVolatility3:
         monkeypatch.setattr(vol_runner, "_module_command", lambda: None)
         monkeypatch.setattr(vol_runner.sys, "executable", str(tmp_path / "python"))
         assert vol_runner.find_vol3_command() == [str(script)]
+
+
+def test_a_packaged_app_runs_volatility_through_itself(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert vol_runner.find_vol3_command() == [sys.executable, "--vol3-cli"]

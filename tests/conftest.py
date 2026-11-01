@@ -54,6 +54,9 @@ def _isolated_config(monkeypatch, tmp_path_factory):
     from core.vol_runner import RUN_GATE
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("config")))
+    # Windows opened by tests must not post to the developer's real desktop.
+    from ui import notifications
+    monkeypatch.setattr(notifications.Notifier, "_post", lambda self, *a: None)
     settings._cache = None
     RUN_GATE.set_limit(1)
     yield

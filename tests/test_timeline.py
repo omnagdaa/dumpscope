@@ -1,7 +1,7 @@
 """The incident timeline: timestamp parsing, event extraction, aggregation."""
 import time
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -11,7 +11,7 @@ from core.timeline import (
 )
 from tests.vol_fixtures import all_payloads, payload
 
-UTC = timezone.utc
+UTC = UTC
 
 
 # ── Timestamps ────────────────────────────────────────────────────────────────
@@ -251,5 +251,28 @@ def test_missing_inputs():
 
 
 def test_every_kind_has_a_label_and_colour():
-    for key, label, color in KINDS:
+    for _key, label, color in KINDS:
         assert label and color.startswith("#") and len(color) == 7
+
+
+def _sessions(*rows):
+    return {"plugin": "windows.sessions.Sessions",
+            "columns": ["Session ID", "Process ID", "Process", "User Name", "Create Time"],
+            "rows": [list(r) for r in rows]}
+
+
+def test_sessions_give_one_event_per_person_not_per_process():
+    events = build_events([_sessions(
+        ["1", "20", "late.exe", "HOST/admin", "2024-03-14 09:00:00"],
+        ["1", "10", "early.exe", "HOST/admin", "2024-03-14 08:00:00"],
+        ["0", "30", "svc.exe", "WORKGROUP/HOST$", "2024-03-14 07:00:00"],
+        ["0", "31", "svc.exe", "NT AUTHORITY/LOCAL SERVICE", "2024-03-14 07:00:00"],
+        ["0", "32", "svc.exe", "/SYSTEM", "2024-03-14 07:00:00"],
+        ["0", "33", "svc.exe", "", "2024-03-14 07:00:00"],
+    )])
+    assert [(e.kind, e.pid, e.process) for e in events] == [("session", "10", "early.exe")]
+
+
+def test_the_memory_plugin_adds_nothing_to_the_timeline():
+    assert build_events([{"plugin": "dumpscope.procmem.ProcMem", "columns": ["PID", "CreateTime"],
+                          "rows": [["1", "2024-03-14 08:00:00"]]}]) == []

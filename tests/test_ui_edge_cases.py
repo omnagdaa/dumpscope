@@ -12,6 +12,8 @@ import os
 import pytest
 from PyQt6.QtWidgets import QMessageBox
 
+from ui import dialogs as message_boxes
+
 from core import settings
 from core.case import Case, remember_case
 from core.plugins import PluginRegistry
@@ -29,7 +31,7 @@ def dialogs(monkeypatch):
         return _show
 
     for kind in ("warning", "critical", "information", "question"):
-        monkeypatch.setattr(QMessageBox, kind, staticmethod(record(kind)))
+        monkeypatch.setattr(message_boxes, kind, record(kind))
     return shown
 
 

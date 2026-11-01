@@ -3,13 +3,13 @@ Plugin registry for DumpScope.
 
 Two sources of truth, layered:
 
-1. INTROSPECTED — the real plugin list is read out of the installed volatility3
+1. INTROSPECTED: the real plugin list is read out of the installed volatility3
    at runtime (in a subprocess, so vol3 never gets imported into the GUI
    process). This yields every plugin id plus, crucially, which *required*
    arguments each one takes. A plugin with an unsatisfied required argument
    cannot be launched from a one-click button; it needs a parameter prompt.
 
-2. CURATED — a hand-maintained catalog that assigns category, icon, colour and
+2. CURATED: a hand-maintained catalog that assigns category, icon, colour and
    a short display name to the plugins worth surfacing on the ribbon. Anything
    introspected but not curated is still reachable from the full plugin browser.
 
@@ -93,7 +93,7 @@ class PluginInfo:
 # ── Introspection ─────────────────────────────────────────────────────────────
 
 # Run inside a throwaway subprocess. Imports all 180+ plugin modules, which is
-# slow and pollutes sys.modules — neither belongs in the GUI process.
+# slow and pollutes sys.modules: neither belongs in the GUI process.
 _INTROSPECT_SRC = r"""
 import json, sys
 import volatility3
@@ -130,7 +130,7 @@ for pid, cls in framework.list_plugins().items():
         "description": (cls.__doc__ or "").strip().split("\n")[0],
     }
 json.dump(out, sys.stdout)
-""" % {"implicit": sorted(_IMPLICIT_REQUIREMENTS),
+""" % {"implicit": sorted(_IMPLICIT_REQUIREMENTS),  # noqa: UP031 (Python source; braces would clash)
        "non_input": sorted(_NON_INPUT_REQUIREMENT_TYPES)}
 
 
@@ -146,8 +146,11 @@ def introspect(python: str | None = None, timeout: int = 180) -> dict:
     Raises on failure; callers should fall back to the curated catalog.
     """
     python = python or sys.executable
+    # -P: no imports from the cwd. A packaged app re-runs itself (see main.py).
+    command = ([sys.executable, "--vol3-introspect"] if getattr(sys, "frozen", False)
+               else [python, "-P", "-c", _INTROSPECT_SRC])
     proc = subprocess.run(
-        [python, "-P", "-c", _INTROSPECT_SRC],     # -P: no imports from the cwd
+        command,
         capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
         creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
     )
@@ -185,7 +188,7 @@ def load_introspected(refresh: bool = False) -> dict | None:
             if current is None or cached.get("version") == current:
                 return cached
             log.info(
-                "Plugin cache was built for volatility3 %s, installed is %s — refreshing",
+                "Plugin cache was built for volatility3 %s, installed is %s; refreshing",
                 cached.get("version"), current,
             )
         except Exception as exc:
@@ -239,6 +242,7 @@ _CATALOG: dict[str, tuple[tuple[str, str, str, str], ...]] = {
         ("windows.netscan.NetScan",                   "Net Scan",       "📡", "Network"),
         ("windows.netstat.NetStat",                   "Net Stat",       "🌐", "Network"),
 
+        ("dumpscope.procmem.ProcMem",                 "Memory Usage",   "🧮", "Memory"),
         ("windows.memmap.Memmap",                     "Memory Map",     "🗺", "Memory"),
         ("windows.vadinfo.VadInfo",                   "VAD Info",       "🧩", "Memory"),
         ("windows.vadwalk.VadWalk",                   "VAD Walk",       "🚶", "Memory"),
@@ -356,6 +360,17 @@ _CATALOG_GENERIC: tuple[tuple[str, str, str, str], ...] = (
 )
 
 
+# Plugins that ship with DumpScope (core/vol_plugins) rather than with
+# volatility3. Introspection never sees them, since they are loaded only for
+# the runs that ask for them, so they are registered here.
+BUNDLED_PLUGINS: dict[str, tuple[str, str]] = {
+    "dumpscope.procmem.ProcMem": (
+        "windows",
+        "Memory use and program icon for every process, for the Memory Usage map.",
+    ),
+}
+
+
 def plugin_os(plugin_id: str) -> str:
     head = plugin_id.split(".", 1)[0]
     return head if head in ("windows", "linux", "mac") else "generic"
@@ -366,7 +381,7 @@ class PluginRegistry:
     The merged view of curated presentation data and introspected truth.
 
     Built once and shared. When introspection is unavailable (volatility3 not
-    importable), the registry still works from the curated catalog alone — it
+    importable), the registry still works from the curated catalog alone: it
     just cannot report argument requirements, so `available` is False and
     callers should warn rather than silently offering plugins that may not run.
     """
@@ -379,7 +394,7 @@ class PluginRegistry:
         self._build()
 
     @classmethod
-    def load(cls, refresh: bool = False) -> "PluginRegistry":
+    def load(cls, refresh: bool = False) -> PluginRegistry:
         return cls(load_introspected(refresh=refresh))
 
     def _build(self):
@@ -400,6 +415,9 @@ class PluginRegistry:
                 description=meta.get("description", ""),
             )
 
+        for pid, (os_name, description) in BUNDLED_PLUGINS.items():
+            self._plugins[pid] = PluginInfo(id=pid, os=os_name, description=description)
+
         # Overlay curated presentation data.
         curated: list[tuple[str, tuple[str, str, str, str]]] = []
         for os_name, entries in _CATALOG.items():
@@ -412,7 +430,7 @@ class PluginRegistry:
                 if self.available:
                     # Curated id that the installed volatility3 does not have.
                     log.warning(
-                        "Catalog plugin %s is not present in volatility3 %s — hiding it",
+                        "Catalog plugin %s is not present in volatility3 %s; hiding it",
                         pid, self.vol_version,
                     )
                     continue
@@ -481,8 +499,9 @@ def build_command_args(info: PluginInfo, values: dict[str, object]) -> list[str]
     Turn user-supplied argument values into volatility3 CLI tokens.
 
     Booleans become bare flags when true and are omitted when false; lists are
-    space-separated after their flag; None and empty strings are dropped so an
-    untouched optional field never reaches the command line.
+    space-separated after their flag; single values are attached with "=";
+    None and empty strings are dropped so an untouched optional field never
+    reaches the command line.
     """
     tokens: list[str] = []
     by_name = {a.name: a for a in info.args}
@@ -498,9 +517,11 @@ def build_command_args(info: PluginInfo, values: dict[str, object]) -> list[str]
             if value:
                 tokens.append(arg.cli_flag)
             continue
-        tokens.append(arg.cli_flag)
         if isinstance(value, (list, tuple)):
+            tokens.append(arg.cli_flag)
             tokens += [str(v) for v in value]
         else:
-            tokens.append(str(value))
+            # Attached, so a value starting with "-" (a YARA string, a negative
+            # offset) is taken as the value and not parsed as another option.
+            tokens.append(f"{arg.cli_flag}={value}")
     return tokens

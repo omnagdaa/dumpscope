@@ -83,8 +83,16 @@ the command line:
   This Image** fetches just what the loaded image needs, usually a few MB.
   The full offline packs (gigabytes) remain available.
 - **Concurrency control:** Tools → *Parallel volatility3 Runs* sets how many
-  vol3 processes may run at once (1–4, default 1). A waiting tab shows
-  *Queued* instead of a frozen progress bar.
+  vol3 processes may run at once (1 to 4, default 1). A waiting tab shows
+  *Queued* instead of a frozen progress bar. Parallel runs on one case are
+  safe: until the case has a complete kernel ISF, runs go one at a time so
+  only one downloads the PDB; a run that hits another's locked identifier
+  cache is retried, not treated as corruption; and a corrupted cache is
+  cleared only once no other run is using it. Tested with 12 plugins at 4
+  slots on a fresh case against a real 14 GB Windows image.
+- **Fast large tables.** Sorting and filtering happen in the model, not per
+  comparison in Python: sorting 100k rows takes well under a second, and the
+  filter box waits for a pause in typing before it runs.
 
 ### Incident timeline
 An Autopsy-style **Timeline** tab merges the timestamps from every plugin run on
@@ -96,7 +104,7 @@ the image into one chronology:
 | DLL loaded | dlllist |
 | Network connection or listener | netscan, netstat |
 | Thread created | thrdscan, threads |
-| Logon session | sessions |
+| User session (first process per user) | sessions |
 | Program executed | UserAssist, ShimCache |
 | File created / modified | mftscan |
 | Driver unloaded | unloadedmodules |
@@ -124,6 +132,18 @@ Events reported by several plugins are de-duplicated. Command lines from
 whichever source plugins haven't been run yet; they queue one at a time and
 the view updates as each finishes. Quick Analysis builds the timeline from the
 open result tabs.
+
+### Memory Usage
+The **Memory Usage** tab is a WinDirStat-style treemap of the machine's memory
+at capture. Each box is one process, sized by the figure you pick (private
+memory by default). Processes group by executable path, so a fake `svchost.exe`
+in a temp folder is a separate program. Each program's icon, read from the PE
+resources in the image, sits in the middle of its group; a program whose icon
+pages were not in memory gets a lettered badge. Hover for details, double-click
+to zoom in, and a red corner marks a process Insights flagged. The data comes
+from a bundled plugin, `dumpscope.procmem.ProcMem`, and the report includes the
+same map. Sizes are read from each process's kernel structures, so they are
+what Windows counted, not a fresh measure of the image's pages.
 
 ### Insights
 The **Insights** tab triages the stored output automatically. Each finding
@@ -200,9 +220,13 @@ the report.
 - **Command palette** (**Ctrl+Shift+P**) for every window action and plugin.
 - Result tabs can be pinned. Pinned tabs have no close button and stay ahead
   of the others.
-- The plugin ribbon scrolls sideways with the mouse wheel.
-- In-window toast notifications, plus optional desktop notifications. A batch
-  of runs is announced once when it finishes, not once per plugin.
+- The plugin ribbon scrolls sideways with the mouse wheel. **Compact tiles**
+  (View → Compact Plugin Tiles) fit more plugins on screen; the choice is
+  remembered.
+- **One desktop notification.** Finished runs are announced through the
+  desktop's notification centre, and the status bar carries the same line.
+  There are no in-window toasts; each new notification replaces the previous
+  one, and a batch of runs is announced once when it finishes.
 
 ### Reliability
 - **A bug never takes the session down.** An unexpected error is logged with
@@ -213,6 +237,14 @@ the report.
   default, such as long malfind hexdumps and command lines, are read in full.
   If parsing fails partway, the vol3 process is stopped rather than left
   blocked on its pipe.
+- **No stuck runs.** volatility3 downloads symbols with no network timeout,
+  so a stalled connection to the symbol server used to hang the first run of
+  a case forever, with every other run queued behind it. Downloads now time
+  out after 60 seconds without data and the run is retried once. Cancelling
+  a run stops vol3, and kills it if it ignores the request. Closing a window
+  waits for its background work instead of aborting mid-thread.
+- **Analysis off the GUI thread.** Timeline and Insights are rebuilt in the
+  background after each run, so the window stays responsive.
 - **No handle leaks.** Every run closes its pipes, so a long session can run
   hundreds of plugins without hitting the open-file limit.
 - **Damaged data degrades, it does not crash.** An unreadable stored result
@@ -224,10 +256,16 @@ Everything in a memory image (process names, command lines, paths) can be
 chosen by an attacker, and a case folder can come from someone else.
 DumpScope treats both as hostile:
 
-- **No markup from the image.** Tooltips escape image text before Qt sees
-  it. Qt would otherwise render a process named `<img src="\\host\share\x">`
-  as HTML and fetch the file on hover, which on Windows leaks the examiner's
-  NTLM hash.
+- **No markup from the image.** Tooltips, labels and message boxes show image
+  and case text as plain text. Qt would otherwise render a process named
+  `<img src="\\host\share\x">` as HTML and fetch the file, which on Windows
+  leaks the examiner's NTLM hash. Case notes are stored and shown as plain
+  text.
+- **Reports load nothing.** The HTML report carries a Content-Security-Policy
+  that blocks scripts and remote content, and tag colours are validated so a
+  case file cannot inject CSS.
+- **No option injection.** Plugin arguments are passed as `--flag=value`, so a
+  value starting with `-` cannot be read as another vol3 option.
 - **No formulas in exports.** Every CSV and TSV goes through one writer that
   defuses cells starting with `= + - @` (the OWASP rule; plain numbers are
   kept). The database and `report.json` keep the original values.
@@ -270,6 +308,27 @@ pip install -e .
 > `pycryptodome` is a hard dependency. Without it, volatility3's credential
 > plugins fail to import and vanish silently, with no error.
 
+## Packages
+
+Ready-to-run builds need no Python. They are built by
+`.github/workflows/package.yml`, by pushing a `v*` tag or running it by hand,
+and land as a draft GitHub release or as workflow artifacts:
+
+| Platform | File | To run |
+| --- | --- | --- |
+| Linux x86_64 (glibc 2.35+) | `DumpScope-linux-x86_64.tar.gz` | Unpack, run `dumpscope/dumpscope`. X11 needs `libxcb-cursor0`. |
+| Windows x86_64 | `DumpScope-windows-x86_64.zip` | Unzip, run `dumpscope\dumpscope.exe`. |
+| macOS Apple Silicon | `DumpScope-macos-arm64.zip` | Unzip, then right-click `DumpScope.app` → Open the first time. |
+
+The builds are not code-signed, so Windows SmartScreen and macOS Gatekeeper warn
+on first launch. YARA plugins need `yara-python`, which is not bundled. To build
+one yourself on the platform you want:
+
+```bash
+uv sync --group package
+uv run pyinstaller --noconfirm packaging/dumpscope.spec    # output in dist/
+```
+
 ## Run
 
 ```bash
@@ -277,6 +336,8 @@ uv run python main.py                    # case launcher
 uv run python main.py --case ~/cases/Op_Nightfall   # open a case directly
 uv run python main.py --analysis         # Quick Analysis, nothing saved
 uv run python main.py --log dumpscope.log         # also write a debug log
+uv run python main.py --debug            # debug messages on the console
+uv run python main.py --version
 uv run python main.py --refresh-plugins  # re-inspect volatility3's plugin list
 ```
 
@@ -370,7 +431,7 @@ and destroys the windows each test leaves behind. Running the suite never
 touches your real settings or recent-case list.
 
 ```bash
-uv run pytest                 # whole suite (about 560 tests, under a minute)
+uv run pytest                 # whole suite (about 620 tests, about a minute)
 uv run pytest -q tests/test_runner_crashes.py   # one file
 uv run pytest -k "gate or corrupt"              # by keyword
 ```
@@ -402,6 +463,10 @@ window through collect → timeline → insights → report against it.
 | Cases, database, reports, OS detection, settings | `test_case*.py`, `test_database.py`, `test_report*.py`, `test_os_detect.py`, `test_settings_and_notifications.py` |
 | Widgets: smoke construction, theme, ribbon, tabs, palette, result model | `test_ui_smoke.py`, `test_theme.py`, `test_plugin_ribbon.py`, `test_result_*.py`, `test_command_palette.py` |
 
+Lint with `uvx ruff check .` (configured in `pyproject.toml`). GitHub Actions
+runs ruff and the test suite on every push and pull request
+(`.github/workflows/ci.yml`).
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -411,6 +476,7 @@ window through collect → timeline → insights → report against it.
 | Timeline or Insights is empty | Use their **Collect** button. Both read stored results, so plugins have to have run on the *active* data source. |
 | Credential plugins missing | Install `pycryptodome` (`uv sync` does this), then Tools → Refresh Plugin List. |
 | *"cache appears to be corrupted … clearing it did not help"* | Delete the folder named in the message (the case's `cache/` folder) and run the plugin again. |
+| *"Unable to validate the plugin requirements: kernel.layer_name"* on a large image | Usually a truncated image: check that its size matches the RAM size of the source machine. If symbols failed to download, the Log tab says so, and the run can be retried. |
 | A plugin tab says *Queued* | Another vol3 run is in progress. Wait, cancel it, or raise Tools → Parallel volatility3 Runs. |
 | Windows: *"uv trampoline failed to canonicalize script path"* | Already handled: DumpScope calls volatility3 through the interpreter, not the `vol.exe` script. Make sure you launch with the venv's `python.exe`. |
 

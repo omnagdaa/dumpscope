@@ -3,7 +3,7 @@ Per-user directories, resolved per platform.
 
 XDG variables are a Linux convention. On Windows they are unset, so
 ``~/.config`` and ``~/.cache`` would be created inside the user profile as
-literal dotted folders — invisible in Explorer, outside every backup and
+literal dotted folders: invisible in Explorer, outside every backup and
 roaming policy, and not where anything else on the system looks. On macOS the
 equivalent is ``~/Library/Application Support``.
 """
