@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DumpScope
+Comment=Memory forensics workbench
+Exec=dumpscope
+Icon=dumpscope
+Categories=Utility;
+Terminal=false

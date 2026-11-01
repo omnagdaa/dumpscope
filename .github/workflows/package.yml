@@ -31,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+            libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libxcb-cursor0
       - run: uv sync --locked --group package
       - run: uv run pytest -q
       - run: uv run pyinstaller --noconfirm packaging/dumpscope.spec
@@ -58,7 +58,13 @@ jobs:
         run: |
           mkdir -p out
           case "$RUNNER_OS" in
-            Linux) tar -C dist -czf "out/DumpScope-${{ matrix.name }}.tar.gz" dumpscope ;;
+            Linux)
+              curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-x86_64.AppImage
+              chmod +x appimagetool
+              packaging/build-appimage.sh ./appimagetool
+              APPIMAGE_EXTRACT_AND_RUN=1 dist/DumpScope-x86_64.AppImage --vol3-cli --help | grep -q "usage: vol"
+              mv dist/DumpScope-x86_64.AppImage out/
+              ;;
             Windows) (cd dist && 7z a -bd "../out/DumpScope-${{ matrix.name }}.zip" dumpscope) ;;
             macOS) ditto -c -k --keepParent dist/DumpScope.app "out/DumpScope-${{ matrix.name }}.zip" ;;
           esac

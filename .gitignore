@@ -14,3 +14,30 @@ wheels/
 # Generated analysis output
 graphify-out/
 .pytest_cache/
+.ruff_cache/
+.hypothesis/
+
+# Packaged builds
+*.AppImage
+appimagetool
+*.tar.gz
+*.dmg
+*.exe
+*.AppDir/
+
+# Evidence and case data: never commit a memory image
+*.raw
+*.mem
+*.vmem
+*.lime
+*.dmp
+*.img
+*.db
+*.db-wal
+*.db-shm
+
+# Logs, editors, OS files
+*.log
+.idea/
+.DS_Store
+Thumbs.db

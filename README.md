@@ -316,7 +316,7 @@ and land as a draft GitHub release or as workflow artifacts:
 
 | Platform | File | To run |
 | --- | --- | --- |
-| Linux x86_64 (glibc 2.35+) | `DumpScope-linux-x86_64.tar.gz` | Unpack, run `dumpscope/dumpscope`. X11 needs `libxcb-cursor0`. |
+| Linux x86_64 (glibc 2.35+) | `DumpScope-x86_64.AppImage` | `chmod +x` it and run it. Without FUSE (`fuse2` on Arch), set `APPIMAGE_EXTRACT_AND_RUN=1`. |
 | Windows x86_64 | `DumpScope-windows-x86_64.zip` | Unzip, run `dumpscope\dumpscope.exe`. |
 | macOS Apple Silicon | `DumpScope-macos-arm64.zip` | Unzip, then right-click `DumpScope.app` → Open the first time. |
 
@@ -327,6 +327,7 @@ one yourself on the platform you want:
 ```bash
 uv sync --group package
 uv run pyinstaller --noconfirm packaging/dumpscope.spec    # output in dist/
+packaging/build-appimage.sh path/to/appimagetool           # Linux: one-file AppImage
 ```
 
 ## Run
