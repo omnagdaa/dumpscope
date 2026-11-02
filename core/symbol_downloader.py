@@ -4,8 +4,8 @@ Symbol table management.
 volatility3 needs a symbol table (ISF) matching the kernel in the image. For
 Windows it can build one itself: it reads the kernel's PDB GUID from the image,
 downloads that PDB from Microsoft's symbol server and converts it. DumpScope
-points that machinery at the case — every run passes the case's symbols folder
-first and hides vol3's shared per-user cache — so the ISF for an image is
+points that machinery at the case (every run passes the case's symbols folder
+first and hides vol3's shared per-user cache) so the ISF for an image is
 written into, and only ever read from, the case that examined it.
 
 SymbolFetcher triggers that download deliberately, for one image. The bulk
@@ -26,6 +26,8 @@ import subprocess
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from core.vol_runner import ISF_SUFFIXES, stop_process
+
 
 log = logging.getLogger("dumpscope.symbols")
 
@@ -37,7 +39,7 @@ SYMBOL_PACKS = {
     "mac":     f"{SYMBOL_BASE_URL}/mac.zip",
 }
 
-SYMBOL_EXTENSIONS = (".json", ".json.xz", ".json.gz", ".json.bz2")
+SYMBOL_EXTENSIONS = ISF_SUFFIXES
 
 
 def symbols_present(base_dir: str) -> bool:
@@ -134,7 +136,7 @@ class SymbolDownloader(QThread):
             if total:
                 self.progress.emit(f"Size: {_format_bytes(total)}")
             else:
-                self.progress.emit("Size unknown — progress will not be shown.")
+                self.progress.emit("Size unknown, so progress cannot be shown.")
 
             downloaded = 0
             last_reported = -1
@@ -210,7 +212,7 @@ class SymbolFetcher(QThread):
 
     Runs ``windows.info.Info`` with the case's symbol arguments. To answer it,
     vol3 identifies the kernel, downloads the matching PDB and writes the ISF
-    into the first symbol folder — the case's. Whatever ISF files are new
+    into the first symbol folder: the case's. Whatever ISF files are new
     afterwards are what was fetched.
     """
 
@@ -228,12 +230,7 @@ class SymbolFetcher(QThread):
 
     def cancel(self):
         self._cancelled = True
-        proc = self._proc
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+        stop_process(self._proc)
 
     def command(self) -> list[str]:
         from core.vol_runner import case_symbol_args, find_vol3_command
@@ -243,7 +240,10 @@ class SymbolFetcher(QThread):
         ) + ["-r", "csv", "-f", os.path.abspath(self.image_path), "windows.info.Info"]
 
     def run(self):
-        from core.vol_runner import RUN_GATE, _creation_flags, build_environment
+        from core.vol_runner import (
+            RUN_GATE, _creation_flags, awaiting_case_symbols, build_environment,
+            discard_partial_isfs,
+        )
         if not self.image_path or not os.path.isfile(self.image_path):
             self.done.emit(False, "No memory image is loaded.", [])
             return
@@ -253,10 +253,15 @@ class SymbolFetcher(QThread):
         before = {path for path, _ in list_symbols(self.base_dir)}
 
         self.progress.emit("Waiting for other volatility3 runs to finish…")
-        if not RUN_GATE.acquire(cancelled=lambda: self._cancelled):
+        # Same rule as plugin runs: while the case has no finished ISF, only
+        # one vol3 process may be fetching or converting into it.
+        if not RUN_GATE.acquire(cancelled=lambda: self._cancelled,
+                                solo=lambda: awaiting_case_symbols([symbols_dir])):
             self.done.emit(False, "Cancelled.", [])
             return
         try:
+            if awaiting_case_symbols([symbols_dir]) and discard_partial_isfs([symbols_dir]):
+                before = {path for path, _ in list_symbols(self.base_dir)}
             self.progress.emit("Identifying the kernel and fetching its PDB from "
                                "Microsoft's symbol server…")
             self._proc = subprocess.Popen(
@@ -264,6 +269,8 @@ class SymbolFetcher(QThread):
                 encoding="utf-8", errors="replace", env=build_environment([symbols_dir]),
                 creationflags=_creation_flags(),
             )
+            if self._cancelled:              # cancel() ran before _proc was set
+                stop_process(self._proc)
             try:
                 _out, err = self._proc.communicate(timeout=self.TIMEOUT)
             except subprocess.TimeoutExpired:

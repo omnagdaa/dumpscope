@@ -56,11 +56,11 @@ def test_two_names_that_sanitise_alike_do_not_merge(tmp_path):
 
 
 @pytest.mark.parametrize("content", [
-    b"[1, 2, 3]",               # valid JSON, wrong shape — used to AttributeError
+    b"[1, 2, 3]",               # valid JSON, wrong shape; used to AttributeError
     b'"just a string"',
     b"null",
     b"{not json",
-    b"\xff\xfe\x00garbage",     # not UTF-8 — used to escape as UnicodeDecodeError
+    b"\xff\xfe\x00garbage",     # not UTF-8; used to escape as UnicodeDecodeError
     b"",
 ])
 def test_damaged_case_file_raises_case_error_not_a_crash(tmp_path, content):
@@ -219,11 +219,10 @@ def test_connections_are_closed(tmp_path):
 
 def test_failed_write_is_rolled_back(db):
     before = len(db.get_results())
-    with pytest.raises(sqlite3.Error):
-        with db._connect() as conn:
-            conn.execute("INSERT INTO analysis_results (case_id, plugin) VALUES (?, ?)",
-                         (db.case_id, "half-written"))
-            conn.execute("SELECT * FROM no_such_table")
+    with pytest.raises(sqlite3.Error), db._connect() as conn:
+        conn.execute("INSERT INTO analysis_results (case_id, plugin) VALUES (?, ?)",
+                     (db.case_id, "half-written"))
+        conn.execute("SELECT * FROM no_such_table")
     assert len(db.get_results()) == before
 
 
@@ -301,7 +300,7 @@ def test_build_command_args_keeps_zero_and_lists():
     info = _info(PluginArg("pid", "List", False), PluginArg("offset", "Int", False),
                  PluginArg("dump", "Boolean", False))
     assert build_command_args(info, {"pid": [4, 8], "offset": 0, "dump": True}) == [
-        "--pid", "4", "8", "--offset", "0", "--dump"]
+        "--pid", "4", "8", "--offset=0", "--dump"]
 
 
 def test_build_command_args_ignores_unknown_names():
@@ -463,3 +462,12 @@ def test_json_report_handles_non_serialisable_values(tmp_path):
     case = Case.create(str(tmp_path), "Odd")
     data = json.loads(build_json(case, [{"added": object()}], [], [], []))
     assert isinstance(data["data_sources"][0]["added"], str)
+
+
+def test_a_case_file_with_broken_unicode_is_refused(tmp_path):
+    from core.case import Case, CaseError
+    case = Case.create(str(tmp_path), "Broken")
+    with open(os.path.join(case.directory, "case.json"), "w", encoding="utf-8") as handle:
+        handle.write('{"case_name": "\\ud83d"}')
+    with pytest.raises(CaseError):
+        Case.open(case.directory)

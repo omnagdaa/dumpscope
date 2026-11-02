@@ -1,8 +1,8 @@
 """
 The tag manager.
 
-Tags are the examiner's own vocabulary for an image — suspicious, malicious,
-known-good — and the panel is the index built out of them: every tag lists the
+Tags are the examiner's own vocabulary for an image (suspicious, malicious,
+known-good) and the panel is the index built out of them: every tag lists the
 output lines it has been applied to, and activating one navigates back to that
 line in the plugin it came from.
 
@@ -143,7 +143,7 @@ class TagPanel(QWidget):
             self._fill(item, mine)
 
         if not tags:
-            placeholder = QTreeWidgetItem(self.tree, ["No tags yet — use + to add one"])
+            placeholder = QTreeWidgetItem(self.tree, ["No tags yet. Use + to add one."])
             placeholder.setData(0, NODE_KIND, KIND_EMPTY)
             placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
             placeholder.setForeground(0, QBrush(faint))

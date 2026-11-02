@@ -14,12 +14,13 @@ report links to by name.
 from __future__ import annotations
 
 import html
+import re
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 # What each extraction actually contains, in words rather than in the plugin's
-# vocabulary — "windows.memmap.Memmap" does not tell a reader what the file is.
+# vocabulary: "windows.memmap.Memmap" does not tell a reader what the file is.
 _EXTRACT_KINDS = {
     "process": "Process executable",
     "memory": "Full process memory",
@@ -81,8 +82,26 @@ footer {
   font-size: 11px; font-weight: 700; color: #fff; text-transform: uppercase;
 }
 .chart { width: 100%; height: auto; margin: 4px 0 6px; }
+.toc { columns: 2; column-gap: 32px; padding-left: 18px; margin: 0 0 8px; }
+.toc li { margin: 2px 0; }
+.lead { font-size: 15px; line-height: 1.6; }
+.exec li { margin: 4px 0; }
+.rule {
+  border: 1px solid #d8dee4; border-radius: 8px; padding: 12px 16px; margin: 0 0 14px;
+}
+.rule h3 { font-family: inherit; font-size: 14px; margin: 0 0 6px; }
+.rule dl { display: grid; grid-template-columns: 170px 1fr; gap: 4px 14px; margin: 8px 0 0; }
+.rule dt { color: #57606a; }
+.rule dd { margin: 0; }
+.alert { color: #cf222e; font-weight: 600; }
+.ok { color: #1a7f37; }
+.memmap { border-radius: 6px; }
+.bar { display: inline-block; height: 8px; border-radius: 4px; background: #4f8fd9;
+  vertical-align: middle; margin-right: 6px; }
 a { color: #0969da; }
-@media print { body { padding: 0; } h2 { break-after: avoid; } }
+@media print {
+  body { padding: 0; } h2 { break-after: avoid; } .rule { break-inside: avoid; }
+}
 """
 
 
@@ -91,9 +110,33 @@ a { color: #0969da; }
 # figures of rows.
 DEFAULT_MAX_ROWS = 200
 
+# The report is built from the image's own strings. Everything is escaped, but
+# should anything slip through, the page still cannot run script or load a
+# single byte from anywhere: no network beacon, no UNC fetch. Links between the
+# report's own files are navigation, which this does not restrict.
+# Images may only be data: URIs, which is how the memory map embeds the
+# programs' icons; nothing can be fetched.
+_CSP = ("default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+        "base-uri 'none'; form-action 'none'")
+
 
 def _e(value) -> str:
     return html.escape("" if value is None else str(value))
+
+
+_COLOR = re.compile(r"#[0-9A-Fa-f]{3,8}")
+
+
+def _color(value, fallback: str = "#6e7781") -> str:
+    """
+    A tag colour safe to put in a style attribute.
+
+    Escaping stops a value leaving the attribute, not CSS running inside it:
+    a tag colour of ``url(//host/x)`` from a case someone else prepared would
+    make the report fetch that address when opened. Only hex colours pass.
+    """
+    text = str(value or "").strip()
+    return text if _COLOR.fullmatch(text) else fallback
 
 
 def _format_size(count: float) -> str:
@@ -108,8 +151,23 @@ def _plural(count: int, noun: str) -> str:
     return f"{count:,} {noun}" + ("" if count == 1 else "s")
 
 
-def _section(title: str, body: str) -> str:
-    return f"<h2>{_e(title)}</h2>\n{body}"
+def _section(title: str, body: str, anchor: str = "") -> str:
+    ident = f' id="{_e(anchor)}"' if anchor else ""
+    return f"<h2{ident}>{_e(title)}</h2>\n{body}"
+
+
+def tool_versions() -> dict[str, str]:
+    """The versions that produced the report, for the methodology section."""
+    from importlib.metadata import PackageNotFoundError, version
+    out = {}
+    for name, package in (("DumpScope", "dumpscope"), ("volatility3", "volatility3")):
+        try:
+            out[name] = version(package)
+        except PackageNotFoundError:
+            out[name] = "unknown"
+    import platform
+    out["Python"] = platform.python_version()
+    return out
 
 
 class _Raw(str):
@@ -150,9 +208,16 @@ def build_html(case, sources: list[dict], results: list[dict],
                max_rows: int = DEFAULT_MAX_ROWS,
                insights: list | None = None,
                timelines: list[tuple[str, list]] | None = None,
-               links: dict | None = None) -> str:
+               links: dict | None = None,
+               memory: list[tuple[str, list]] | None = None,
+               moments: dict | None = None,
+               versions: dict | None = None) -> str:
     """
     Render the case report. `case` is a core.case.Case.
+
+    `memory` is (data source label, [core.memory_map.Program]) per source;
+    `moments` maps a data source label to its core.timeline key moments;
+    `versions` names the tools that produced the output (tool_versions()).
 
     `extractions` are the files plugins carved out of the image; `outputs`
     maps a result id to its full {columns, rows} payload, for the sections that
@@ -170,15 +235,17 @@ def build_html(case, sources: list[dict], results: list[dict],
     links = links or {}
     insights = insights or []
     timelines = [(label, events) for label, events in (timelines or []) if events]
-    generated = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    memory = [(label, programs) for label, programs in (memory or []) if programs]
+    moments = moments or {}
+    generated = datetime.now(UTC).astimezone().strftime("%Y-%m-%d %H:%M %Z")
 
     meta_rows = [
         ("Case Name", case.case_name),
-        ("Case Number", case.case_number or "—"),
-        ("Opened", case.date_time or case.created_at or "—"),
-        ("Examiner", case.examiner_name or "—"),
-        ("Examiner ID", case.examiner_id or "—"),
-        ("Contact", " · ".join(p for p in (case.examiner_email, case.examiner_phone) if p) or "—"),
+        ("Case Number", case.case_number or "-"),
+        ("Opened", case.date_time or case.created_at or "-"),
+        ("Examiner", case.examiner_name or "-"),
+        ("Examiner ID", case.examiner_id or "-"),
+        ("Contact", " · ".join(p for p in (case.examiner_email, case.examiner_phone) if p) or "-"),
         ("Case Folder", case.directory),
     ]
     meta = "<dl class='meta'>" + "".join(
@@ -186,7 +253,7 @@ def build_html(case, sources: list[dict], results: list[dict],
     ) + "</dl>"
 
     notes_block = (
-        f"<h2>Case Notes</h2><p class='note'>{_e(case.notes)}</p>"
+        f"<h2 id='notes'>Case Notes</h2><p class='note'>{_e(case.notes)}</p>"
         if case.notes else ""
     )
 
@@ -195,7 +262,7 @@ def build_html(case, sources: list[dict], results: list[dict],
             source.get("display_name") or os.path.basename(source["path"]),
             source["path"],
             _format_size(source.get("size_bytes") or 0),
-            source.get("os_hint") or "—",
+            source.get("os_hint") or "-",
             source.get("md5") or "not computed",
             source.get("sha256") or "not computed",
         ]
@@ -209,9 +276,9 @@ def build_html(case, sources: list[dict], results: list[dict],
     result_rows = [
         [
             result["plugin"],
-            result.get("source_name") or "—",
+            result.get("source_name") or "-",
             f"{result.get('row_count') or 0:,}",
-            result.get("created_at") or "—",
+            result.get("created_at") or "-",
         ]
         for result in results
     ]
@@ -222,16 +289,16 @@ def build_html(case, sources: list[dict], results: list[dict],
     bookmark_rows = []
     for bookmark in bookmarks:
         tag = bookmark.get("tag") or ""
-        color = bookmark.get("tag_color") or "#6e7781"
+        color = _color(bookmark.get("tag_color"))
         tag_html = (
             f'<span class="tag" style="background:{_e(color)}">{_e(tag)}</span>'
-            if tag else '<span class="muted">—</span>'
+            if tag else '<span class="muted">-</span>'
         )
         bookmark_rows.append([
             bookmark.get("label") or "(unlabelled)",
             tag_html,
-            bookmark.get("artifact_type") or "—",
-            bookmark.get("source_name") or "—",
+            bookmark.get("artifact_type") or "-",
+            bookmark.get("source_name") or "-",
             bookmark.get("notes") or "",
             bookmark.get("description") or "",
             bookmark.get("created_at") or "",
@@ -262,12 +329,12 @@ def build_html(case, sources: list[dict], results: list[dict],
                       if target else _e(label))
         extraction_rows.append([
             _Raw(label_html),
-            _EXTRACT_KINDS.get(item.get("kind") or "", item.get("kind") or "—"),
-            item.get("pid") or "—",
-            item.get("process") or "—",
+            _EXTRACT_KINDS.get(item.get("kind") or "", item.get("kind") or "-"),
+            item.get("pid") or "-",
+            item.get("process") or "-",
             _format_size(item.get("size_bytes") or 0),
             item.get("sha256") or "not computed",
-            item.get("created_at") or "—",
+            item.get("created_at") or "-",
         ])
     extraction_table = _table(
         ["File", "Contents", "PID", "Process", "Size", "SHA-256", "Extracted"],
@@ -276,7 +343,7 @@ def build_html(case, sources: list[dict], results: list[dict],
     extraction_note = (
         '<p class="muted">Files are stored in the case\'s <code>dumps</code> '
         "folder. Extracted process images and memory may contain live malicious "
-        "code — handle them in an isolated environment.</p>"
+        "code. Handle them in an isolated environment.</p>"
         if extraction_rows else ""
     )
 
@@ -301,7 +368,7 @@ def build_html(case, sources: list[dict], results: list[dict],
             blocks.append(_result_block(result, payload, max_rows,
                                         links.get("results", {}).get(result.get("id"))))
         if blocks:
-            output_block = _section("Analysis Output", "".join(blocks))
+            output_block = _section("Analysis Output", "".join(blocks), "output")
 
     audit_block = ""
     if include_audit:
@@ -314,27 +381,51 @@ def build_html(case, sources: list[dict], results: list[dict],
             "Audit Trail",
             _table(["Timestamp", "Action", "Detail", "Examiner"],
                    audit_rows, mono_columns={0, 2}),
+            "audit",
         )
+
+    sections = [
+        ("summary", "Executive Summary", True),
+        ("case", "Case Details", True),
+        ("notes", "Case Notes", bool(case.notes)),
+        ("insights", "Insights", bool(insights)),
+        ("timeline", "Incident Timeline", bool(timelines)),
+        ("memory", "Memory Usage", bool(memory)),
+        ("sources", "Data Sources", True),
+        ("analysis", "Analysis Performed", True),
+        ("findings", "Bookmarked Findings", True),
+        ("extracted", "Extracted Files", True),
+        ("output", "Analysis Output", bool(output_block)),
+        ("method", "Methodology", True),
+        ("audit", "Audit Trail", bool(audit_block)),
+    ]
+    toc = ("<ol class='toc'>" + "".join(
+        f"<li><a href='#{anchor}'>{_e(title)}</a></li>"
+        for anchor, title, shown in sections if shown) + "</ol>")
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>{_e(case.case_name)} — DumpScope Case Report</title>
+<meta http-equiv="Content-Security-Policy" content="{_CSP}">
+<title>{_e(case.case_name)} - DumpScope Case Report</title>
 <style>{REPORT_CSS}</style>
 </head><body><div class="wrap">
 <h1>{_e(case.case_name)}</h1>
 <p class="sub">DumpScope case report · generated {_e(generated)}</p>
-{_summary_block(sources, results, bookmarks, extractions, insights, timelines)}
-{_section("Case Details", meta)}
+{toc}
+{_summary_block(case, sources, results, bookmarks, extractions, insights, timelines, memory)}
+{_section("Case Details", meta, "case")}
 {notes_block}
 {_insights_block(insights, links.get("insights"))}
-{_timeline_block(timelines, links.get("timeline", {}), max_rows)}
-{_section(f"Data Sources ({len(sources)})", sources_table)}
-{_section(f"Analysis Performed ({len(results)})", results_table)}
-{_section(f"Findings ({len(bookmarks)})", bookmarks_table)}
+{_timeline_block(timelines, links.get("timeline", {}), max_rows, moments)}
+{_memory_block(memory, insights)}
+{_section(f"Data Sources ({len(sources)})", sources_table, "sources")}
+{_section(f"Analysis Performed ({len(results)})", results_table, "analysis")}
+{_section(f"Bookmarked Findings ({len(bookmarks)})", bookmarks_table, "findings")}
 {tag_summary}
-{_section(f"Extracted Files ({len(extraction_rows)})", extraction_table)}
+{_section(f"Extracted Files ({len(extraction_rows)})", extraction_table, "extracted")}
 {extraction_note}
 {output_block}
+{_methodology_block(results, insights, versions)}
 {audit_block}
 <footer>
 Generated by DumpScope. {_e(links.get("footer") or "Full result sets are exported separately as CSV/JSON alongside this report.")}
@@ -348,6 +439,12 @@ def _result_block(result: dict, payload: dict, max_rows: int,
     columns = payload.get("columns") or []
     rows = payload.get("rows") or []
     shown = rows[:max_rows]
+    # DumpScope's memory plugin carries each program's icon as base64: it is
+    # drawn in the Memory Usage section, not printed as kilobytes of text.
+    if "Icon" in columns and str(result.get("plugin") or "").startswith("dumpscope."):
+        keep = [i for i, c in enumerate(columns) if c != "Icon"]
+        columns = [columns[i] for i in keep]
+        shown = [[row[i] for i in keep if i < len(row)] for row in shown]
     link = f" · <a href='{_e(_href(csv_path))}'>full CSV</a>" if csv_path else ""
     heading = (
         f"<h3>{_e(result.get('plugin'))} "
@@ -372,7 +469,7 @@ def build_json(case, sources, results, bookmarks, audit,
     from dataclasses import asdict
     from core.timeline import format_time, summarise
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "case": case.to_dict(),
         "data_sources": sources,
         "results": results,
@@ -409,7 +506,8 @@ def build_json(case, sources, results, bookmarks, audit,
 
 # ── Summary, insights and timeline ────────────────────────────────────────────
 
-def _summary_block(sources, results, bookmarks, extractions, insights, timelines) -> str:
+def _summary_block(case, sources, results, bookmarks, extractions, insights,
+                   timelines, memory) -> str:
     from core.insights import counts
     tally = counts(insights)
     events = sum(len(events) for _, events in timelines)
@@ -426,40 +524,144 @@ def _summary_block(sources, results, bookmarks, extractions, insights, timelines
         f"<div class='card'><div class='n'>{n:,}</div><div class='l'>{_e(label)}</div></div>"
         for n, label in cards
     ) + "</div>"
-    spans = []
-    for label, items in timelines:
-        spans.append(
-            f"<p class='muted'>{_e(label)}: activity from "
-            f"{_e(_fmt_time(items[0].time))} to {_e(_fmt_time(items[-1].time))}.</p>")
-    return _section("Summary", body + "".join(spans))
+    return _section("Executive Summary",
+                    executive_summary(case, sources, results, bookmarks, extractions,
+                                      insights, timelines, memory) + body, "summary")
+
+
+def executive_summary(case, sources, results, bookmarks, extractions, insights,
+                      timelines, memory=()) -> str:
+    """
+    The opening paragraphs, written from the case's own numbers.
+
+    Plain statements of what was examined and what came out of it, so a reader
+    who stops after the first screen still knows the result.
+    """
+    from core.insights import counts
+    from core.memory_map import DEFAULT_METRIC, METRIC_LABELS, format_bytes, ranked
+    points = []
+    names = ", ".join(s.get("display_name") or os.path.basename(s.get("path") or "")
+                      for s in sources) or "no data source"
+    plugins = len({r.get("plugin") for r in results})
+    points.append(
+        f"{_e(_plural(len(sources), 'memory image'))} examined ({_e(names)}) with "
+        f"{_e(_plural(plugins, 'Volatility 3 plugin'))} "
+        f"({_e(_plural(len(results), 'run'))}).")
+    tally = counts(insights)
+    if insights:
+        serious = [f for f in insights if f.severity in ("high", "medium")]
+        text = (f"Automatic triage raised {_e(_plural(len(insights), 'lead'))}: "
+                f"{tally.get('high', 0)} high, {tally.get('medium', 0)} medium, "
+                f"{tally.get('low', 0) + tally.get('info', 0)} low or informational.")
+        if serious:
+            top = "; ".join(
+                _e(f.title + (f" ({f.process}, PID {f.pid})" if f.pid else ""))
+                for f in serious[:3])
+            text += f" <span class='alert'>Most significant: {top}.</span>"
+        points.append(text)
+    elif results:
+        points.append("<span class='ok'>Automatic triage found nothing unusual</span> in "
+                      "the output examined. That covers only the plugins that were run; "
+                      "see Methodology.")
+    for label, events in timelines:
+        points.append(f"{_e(label)}: recorded activity from "
+                      f"{_e(_fmt_time(events[0].time))} to {_e(_fmt_time(events[-1].time))} "
+                      f"({len(events):,} timeline events).")
+    for label, programs in memory:
+        shown = ranked(programs, DEFAULT_METRIC)
+        if not shown:
+            continue
+        total = sum(p.total(DEFAULT_METRIC) for p in shown)
+        top = ", ".join(f"{_e(p.title)} ({format_bytes(p.total(DEFAULT_METRIC))})"
+                        for p in shown[:3])
+        points.append(f"{_e(label)}: {format_bytes(total)} of "
+                      f"{_e(METRIC_LABELS[DEFAULT_METRIC].lower())} in use by "
+                      f"{_plural(len(shown), 'program')}; the largest were {top}.")
+    if bookmarks:
+        tags = {}
+        for b in bookmarks:
+            tags[b.get("tag") or "untagged"] = tags.get(b.get("tag") or "untagged", 0) + 1
+        tag_text = ", ".join(f"{n} {_e(t)}" for t, n in sorted(tags.items(), key=lambda kv: -kv[1]))
+        points.append(f"The examiner bookmarked {_e(_plural(len(bookmarks), 'finding'))} "
+                      f"({tag_text}).")
+    else:
+        points.append("No findings were bookmarked by the examiner.")
+    if extractions:
+        points.append(f"{_e(_plural(len(extractions), 'file'))} were extracted from the "
+                      "image, each with a SHA-256 taken at extraction.")
+    examiner = f" by {_e(case.examiner_name)}" if getattr(case, "examiner_name", "") else ""
+    lead = (f"<p class='lead'>This report records the memory analysis carried out"
+            f"{examiner} for case <b>{_e(case.case_name)}</b>"
+            + (f" ({_e(case.case_number)})" if getattr(case, "case_number", "") else "")
+            + ".</p>")
+    return lead + "<ul class='exec'>" + "".join(f"<li>{p}</li>" for p in points) + "</ul>"
 
 
 def _insights_block(insights, csv_path) -> str:
     if not insights:
         return ""
-    from core.insights import SEVERITY_COLORS
+    from core.insights import SEVERITIES, SEVERITY_COLORS, rule_for
+    rank = {name: i for i, name in enumerate(SEVERITIES)}
     rows = []
     for finding in insights:
         color = SEVERITY_COLORS.get(finding.severity, "#6e7781")
         rows.append([
             _Raw(f'<span class="sev" style="background:{color}">{_e(finding.severity)}</span>'),
-            finding.category, finding.title, finding.pid or "—",
-            finding.process or "—", finding.detail,
+            finding.category, finding.title, finding.pid or "-",
+            finding.process or "-", finding.detail,
         ])
     link = (f"<p class='muted'>Also in <a href='{_e(_href(csv_path))}'>"
             f"{_e(os.path.basename(csv_path))}</a>.</p>" if csv_path else "")
-    note = ("<p class='muted'>Automatic leads from the stored plugin output. Each "
-            "names the evidence behind it; confirm before relying on it.</p>")
-    return _section(f"Insights ({len(insights)})", note + _table(
-        ["Severity", "Category", "Finding", "PID", "Process", "Detail"], rows,
-        mono_columns={5}) + link)
+    note = ("<p class='muted'>Leads from fixed triage rules applied to the stored "
+            "plugin output (not machine learning, not a verdict). Each rule below says "
+            "what it checks, why it matters, how to confirm the lead and what most "
+            "often explains it innocently. The full list follows.</p>")
+
+    # One card per rule that fired, most severe first.
+    by_rule: dict[str, list] = {}
+    rules = {}
+    for finding in insights:
+        rule = rule_for(finding)
+        key = rule.id if rule else finding.category
+        rules[key] = rule
+        by_rule.setdefault(key, []).append(finding)
+    order = sorted(by_rule, key=lambda k: min(rank.get(f.severity, 9) for f in by_rule[k]))
+    cards = []
+    for key in order:
+        rule, items = rules[key], by_rule[key]
+        name = rule.name if rule else key
+        where = ", ".join(
+            _e(f"{f.process} ({f.pid})" if f.pid else f.title) for f in items[:8])
+        if len(items) > 8:
+            where += f" and {len(items) - 8} more"
+        body = f"<p><b>{_e(_plural(len(items), 'lead'))}</b>: {where}</p>"
+        if rule:
+            attack = ", ".join(f"{_e(i)} {_e(n)}" for i, n in rule.attack)
+            body += ("<dl>"
+                     f"<dt>What it checks</dt><dd>{_e(rule.checks)}</dd>"
+                     f"<dt>Why it matters</dt><dd>{_e(rule.why)}</dd>"
+                     f"<dt>How to confirm</dt><dd>{_e(rule.verify)}</dd>"
+                     f"<dt>Innocent causes</dt><dd>{_e(rule.noise)}</dd>"
+                     + (f"<dt>MITRE ATT&amp;CK</dt><dd>{attack}</dd>" if attack else "")
+                     + "</dl>")
+        cards.append(f"<div class='rule'><h3>{_e(name)}</h3>{body}</div>")
+    return _section(f"Insights ({len(insights)})", note + "".join(cards)
+                    + "<h3>All leads</h3>" + _table(
+                        ["Severity", "Category", "Finding", "PID", "Process", "Detail"],
+                        rows, mono_columns={5}) + link, "insights")
 
 
-def _timeline_block(timelines, csv_links: dict, max_rows: int) -> str:
+def _timeline_block(timelines, csv_links: dict, max_rows: int,
+                    moments: dict | None = None) -> str:
     if not timelines:
         return ""
     from core.timeline import EVENT_COLUMNS
-    parts = []
+    moments = moments or {}
+    parts = ["<p class='muted'>Every timestamp found in the plugin output (process "
+             "start and exit, DLL loads, network connections, user sessions, program "
+             "execution records), merged and sorted. Times are UTC as recorded by "
+             "the machine. Key moments are the events worth reading first; red ones "
+             "involve a process Insights flagged.</p>"]
     for label, events in timelines:
         csv_path = csv_links.get(label)
         shown = events[:max_rows]
@@ -473,12 +675,101 @@ def _timeline_block(timelines, csv_links: dict, max_rows: int) -> str:
         elif csv_path:
             more = (f"<p class='muted'>Also in <a href='{_e(_href(csv_path))}'>"
                     f"{_e(os.path.basename(csv_path))}</a>.</p>")
+        key = moments.get(label) or []
+        key_table = ""
+        if key:
+            key_rows = [[_fmt_time(m.time),
+                         _Raw(f"<span class='alert'>{_e(m.title)}</span>"
+                              if m.tone == "alert" else _e(m.title)),
+                         m.detail] for m in key]
+            key_table = ("<p><b>Key moments</b></p>"
+                         + _table(["Time (UTC)", "Moment", "Detail"], key_rows,
+                                  mono_columns={0}))
         parts.append(
             f"<h3>{_e(label)} <span class='muted'>· {_plural(len(events), 'event')}</span></h3>"
+            + key_table
             + timeline_svg(events)
             + _table(EVENT_COLUMNS, [e.as_row() for e in shown], mono_columns={0})
             + more)
-    return _section("Incident Timeline", "".join(parts))
+    return _section("Incident Timeline", "".join(parts), "timeline")
+
+
+def _memory_block(memory, insights) -> str:
+    """The memory map per data source, with the largest programs listed."""
+    if not memory:
+        return ""
+    from core.memory_map import (DEFAULT_METRIC, METRICS, METRIC_LABELS, colour_for,
+                                 format_bytes, ranked, treemap_svg)
+    flagged = {f.pid for f in insights or () if f.pid}
+    explanation = dict((k, e) for k, _, e in METRICS)[DEFAULT_METRIC]
+    parts = [f"<p class='muted'>Each box is one process, its area proportional to its "
+             f"{_e(METRIC_LABELS[DEFAULT_METRIC].lower())} ({_e(explanation)}). Boxes are "
+             "grouped by program, with the program's icon recovered from the image where "
+             "its pages were in memory. Hover a box in a browser for details; a red corner "
+             "marks a process Insights flagged. Read from each process's EPROCESS "
+             "counters by DumpScope's bundled plugin.</p>"]
+    for label, programs in memory:
+        shown = ranked(programs, DEFAULT_METRIC)
+        if not shown:
+            continue
+        total = sum(p.total(DEFAULT_METRIC) for p in shown) or 1
+        peak = shown[0].total(DEFAULT_METRIC) or 1
+        rows = []
+        for rank, program in enumerate(shown[:15]):
+            amount = program.total(DEFAULT_METRIC)
+            width = max(2, int(120 * amount / peak))
+            rows.append([
+                program.title, program.path or program.name,
+                _Raw(f"<span class='bar' style='width:{width}px;background:"
+                     f"{colour_for(rank)}'></span>{_e(format_bytes(amount))}"),
+                f"{amount / total * 100:.1f}%", str(len(program.processes)),
+            ])
+        parts.append(
+            f"<h3>{_e(label)} <span class='muted'>· {format_bytes(total)} across "
+            f"{_plural(len(shown), 'program')}</span></h3>"
+            + treemap_svg(programs, DEFAULT_METRIC, flagged_pids=flagged)
+            + _table(["Program", "Path", METRIC_LABELS[DEFAULT_METRIC], "Share", "Processes"],
+                     rows, mono_columns={1}))
+    return _section("Memory Usage", "".join(parts), "memory")
+
+
+def _methodology_block(results, insights, versions) -> str:
+    """How the output was produced, and what the report cannot say."""
+    from core.insights import rule_status
+    versions = versions or {}
+    have = {r.get("plugin") or "" for r in results}
+    tools = "".join(f"<dt>{_e(k)}</dt><dd>{_e(v)}</dd>" for k, v in versions.items())
+    rule_rows = []
+    for rule, ran, produced, missing in rule_status(have, insights or []):
+        if ran:
+            state = _Raw(f"<span class='alert'>{produced} lead(s)</span>" if produced
+                         else "<span class='ok'>Ran, nothing flagged</span>")
+        else:
+            state = _Raw("<span class='muted'>Not run; needs "
+                         + _e(", ".join(m.rsplit(".", 1)[-1] for m in missing)) + "</span>")
+        rule_rows.append([rule.name, rule.checks, state])
+    body = (
+        "<p>Every result in this report comes from the Volatility 3 framework run "
+        "against the memory image(s) listed under Data Sources, read-only. DumpScope "
+        "runs each plugin as a separate process and stores its full output in the case "
+        "database; the CSV files beside this report are those outputs, unmodified. The "
+        "image is never written to; its hashes are recorded when it is added.</p>"
+        + (f"<dl class='meta'>{tools}</dl>" if tools else "")
+        + "<h3>Triage rules applied</h3>"
+        + _table(["Rule", "What it checks", "Result"], rule_rows)
+        + "<h3>Limitations</h3><ul>"
+        "<li>Memory is a snapshot: anything that ended before the capture and whose "
+        "structures were reused is not visible.</li>"
+        "<li>The triage rules compare the output with how a normal Windows system "
+        "looks. A lead is a place to look, not a conclusion, and no lead does not "
+        "mean the system was clean; only the plugins listed were run.</li>"
+        "<li>Timestamps are the machine's own clock. If it was wrong, they are "
+        "wrong by the same amount.</li>"
+        "<li>Memory figures are the counters Windows kept per process; shared pages "
+        "are counted in every process that maps them.</li>"
+        "<li>Malware with kernel access can alter the structures Volatility reads. "
+        "Where two plugins disagree, both are reported.</li></ul>")
+    return _section("Methodology", body, "method")
 
 
 def _fmt_time(moment) -> str:

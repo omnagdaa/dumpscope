@@ -1,8 +1,8 @@
 """
 An incident timeline built from stored plugin output.
 
-Volatility3 plugins each carry a few timestamps — when a process was created,
-when a DLL was mapped, when a socket was opened — but each plugin reports only
+Volatility3 plugins each carry a few timestamps (when a process was created,
+when a DLL was mapped, when a socket was opened) but each plugin reports only
 its own. This module turns the output of every plugin that has been run into
 one ordered list of events, the way Autopsy's timeline does for disk images, so
 an examiner can see that a document was opened, a process spawned from it, a
@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 # ── Event kinds ───────────────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ KINDS: tuple[tuple[str, str, str], ...] = (
     ("thread",       "Thread created",    "#9aa7b8"),
     ("dll",          "DLL loaded",        "#b39ddb"),
     ("network",      "Network activity",  "#6aa9e0"),
-    ("session",      "Logon session",     "#d9c07a"),
+    ("session",      "User session",      "#d9c07a"),
     ("execution",    "Program executed",  "#e0a06a"),
     ("registry",     "Registry change",   "#c79ad9"),
     ("file",         "File activity",     "#8fbf7f"),
@@ -37,6 +37,28 @@ KINDS: tuple[tuple[str, str, str], ...] = (
     ("other",        "Other",             "#95a09b"),
 )
 KIND_LABELS = {key: label for key, label, _ in KINDS}
+
+# What each event type means and where it comes from, for the legend's
+# tooltips and the "How the timeline works" panel.
+KIND_HELP = {
+    "process": "A program was started. Read from the process list and the "
+               "process scan (each process's create time).",
+    "process_exit": "A program ended, but its record was still in memory when "
+                    "the image was taken (exit time).",
+    "thread": "A thread was started inside a process (thread scan).",
+    "dll": "A DLL was loaded into a process (DLL List load time). Bursts of "
+           "these follow every program start.",
+    "network": "A network connection or listening socket was opened (Net Scan "
+               "created time).",
+    "session": "The first process seen for a user in a session (Sessions). Shows when "
+               "the user was active; the plugin does not record the logon itself.",
+    "execution": "Evidence that a program was run by a user, such as the "
+                 "registry's UserAssist and ShimCache records.",
+    "registry": "A registry key was last written.",
+    "file": "A file's timestamps, from the file system's master file table.",
+    "driver": "A driver was loaded or unloaded.",
+    "other": "Any other timestamp in a plugin's output.",
+}
 KIND_COLORS = {key: color for key, _, color in KINDS}
 
 # Plugins whose output feeds the timeline, in the order "Collect timeline
@@ -67,8 +89,8 @@ _TIME = re.compile(
 # Windows FILETIME zero is 1601-01-01; unset UNIX times are 1970-01-01. Neither
 # is an event, and nothing in a memory image of a running Windows machine
 # predates its first release with a kernel volatility3 supports.
-_EARLIEST = datetime(1990, 1, 1, tzinfo=timezone.utc)
-_LATEST = datetime(2100, 1, 1, tzinfo=timezone.utc)
+_EARLIEST = datetime(1990, 1, 1, tzinfo=UTC)
+_LATEST = datetime(2100, 1, 1, tzinfo=UTC)
 
 
 def parse_time(value) -> datetime | None:
@@ -76,7 +98,7 @@ def parse_time(value) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        moment = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        moment = value if value.tzinfo else value.replace(tzinfo=UTC)
     else:
         match = _TIME.match(str(value))
         if not match:
@@ -85,7 +107,7 @@ def parse_time(value) -> datetime | None:
         try:
             moment = datetime(
                 int(year), int(month), int(day), int(hour), int(minute), int(second),
-                int((fraction or "0")[:6].ljust(6, "0")), tzinfo=timezone.utc,
+                int((fraction or "0")[:6].ljust(6, "0")), tzinfo=UTC,
             )
         except ValueError:
             return None
@@ -94,7 +116,7 @@ def parse_time(value) -> datetime | None:
             digits = zone[1:].replace(":", "")
             offset = timedelta(hours=int(digits[:2]), minutes=int(digits[2:4]))
             moment -= sign * offset
-    moment = moment.astimezone(timezone.utc)
+    moment = moment.astimezone(UTC)
     if not _EARLIEST <= moment < _LATEST:
         return None
     return moment
@@ -103,7 +125,7 @@ def parse_time(value) -> datetime | None:
 def format_time(moment: datetime | None) -> str:
     if moment is None:
         return ""
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 # ── Events ────────────────────────────────────────────────────────────────────
@@ -169,8 +191,14 @@ def _process_events(plugin, columns, rows, ctx) -> list[Event]:
             ctx.names.setdefault(pid, name)
         created = parse_time(_cell(row, index, "CreateTime"))
         if created:
-            events.append(Event(created, "process", f"{name or '?'} started"
-                                + (f" by PPID {ppid}" if ppid else ""),
+            parent = ctx.names.get(ppid, "")
+            if parent:
+                by = f" by {parent} (PID {ppid})"
+            elif ppid and ppid != "0":
+                by = f" by PID {ppid}, which had already exited"
+            else:
+                by = ""
+            events.append(Event(created, "process", f"{name or '?'} started{by}",
                                 pid, name, plugin))
         exited = parse_time(_cell(row, index, "ExitTime"))
         if exited:
@@ -234,21 +262,26 @@ def _thread_events(plugin, columns, rows, ctx) -> list[Event]:
 
 
 def _session_events(plugin, columns, rows, ctx) -> list[Event]:
+    """
+    One event per person per session. The plugin has a row per process and its
+    time is that process's start, so this is when the user was first active,
+    not a recorded logon. Service and machine accounts say nothing about people.
+    """
     index = _index(columns)
-    events = []
+    first: dict[tuple[str, str], tuple] = {}
     for row in rows:
         moment = parse_time(_cell(row, index, "Create Time"))
-        if not moment:
-            continue
         user = _cell(row, index, "User Name")
-        session = _cell(row, index, "Session ID")
-        kind = _cell(row, index, "Session Type")
-        pid = _cell(row, index, "Process ID")
-        events.append(Event(moment, "session",
-                            f"Session {session} {kind}".strip()
-                            + (f" for {user}" if user else ""),
-                            pid, _cell(row, index, "Process"), plugin))
-    return events
+        name = user.replace("\\", "/").rsplit("/", 1)[-1].upper()
+        if not moment or not name or name.endswith("$") or name == "SYSTEM" \
+                or "NT AUTHORITY" in user.upper():
+            continue
+        key = (_cell(row, index, "Session ID"), user)
+        if key not in first or moment < first[key][0]:
+            first[key] = (moment, _cell(row, index, "Process ID"), _cell(row, index, "Process"))
+    return [Event(moment, "session", f"First process of {user} in session {session}: {process}",
+                  pid, process, plugin)
+            for (session, user), (moment, pid, process) in first.items()]
 
 
 def _userassist_events(plugin, columns, rows, ctx) -> list[Event]:
@@ -344,7 +377,7 @@ def _generic_events(plugin, columns, rows, ctx) -> list[Event]:
             moment = parse_time(_cell(row, index, column))
             if moment:
                 kind = "registry" if "registry" in plugin.lower() else "other"
-                events.append(Event(moment, kind, f"{label} — {column}", pid,
+                events.append(Event(moment, kind, f"{label}: {column}", pid,
                                     ctx.names.get(pid, ""), plugin))
     return events
 
@@ -359,6 +392,8 @@ _EXTRACTORS = {
     "thrdscan.thrdscan": _thread_events,
     "threads.threads": _thread_events,
     "sessions.sessions": _session_events,
+    # Its process times repeat pslist's, and it is read by the Memory Usage tab.
+    "procmem.procmem": lambda plugin, columns, rows, ctx: [],
     "userassist.userassist": _userassist_events,
     "shimcachemem.shimcachemem": _shimcache_events,
     "mftscan.mftscan": _mft_events,
@@ -396,6 +431,16 @@ def build_events(payloads: list[dict]) -> list[Event]:
     # list; psscan then only contributes what pslist could not see.
     usable.sort(key=lambda item: _FIRST.index(_suffix(item[0]))
                 if _suffix(item[0]) in _FIRST else len(_FIRST))
+    # Every process's name before any event is built, so "started by" can
+    # name the parent even when the parent's row comes later.
+    for plugin, columns, rows in usable:
+        if _suffix(plugin) in _FIRST:
+            index = _index(columns)
+            for row in rows:
+                pid = _cell(row, index, "PID")
+                name = _cell(row, index, "ImageFileName", "Name")
+                if pid and name:
+                    ctx.names.setdefault(pid, name)
     for plugin, columns, rows in usable:
         if _suffix(plugin) == "cmdline.cmdline":
             index = _index(columns)
@@ -486,6 +531,122 @@ def summarise(events: list[Event]) -> dict:
         "last": format_time(span[1]) if span else "",
         "by_kind": dict(Counter(e.kind for e in events)),
     }
+
+
+# ── Key moments ───────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Moment:
+    """One line of the timeline's summary: what happened, and why it matters."""
+    time: datetime
+    title: str
+    detail: str
+    tone: str = "neutral"            # neutral | alert
+    pid: str = ""
+
+
+def capture_time(payloads: list[dict]) -> datetime | None:
+    """The system clock recorded in the image (windows.info's SystemTime)."""
+    for payload in payloads or []:
+        if not isinstance(payload, dict) or _suffix(str(payload.get("plugin") or "")) != "info.info":
+            continue
+        index = _index([str(c) for c in payload.get("columns") or []])
+        for row in payload.get("rows") or []:
+            if isinstance(row, (list, tuple)) and _cell(row, index, "Variable") == "SystemTime":
+                return parse_time(_cell(row, index, "Value"))
+    return None
+
+
+_LATE_WINDOW = timedelta(minutes=10)
+_COUNTED = {"process": "processes started", "process_exit": "processes exited",
+            "thread": "threads started", "dll": "DLLs loaded", "network": "connections",
+            "session": "user sessions", "execution": "program runs",
+            "registry": "registry writes", "file": "file events",
+            "driver": "driver events", "other": "other events"}
+
+
+def key_moments(events: list[Event], findings=(), captured: datetime | None = None,
+                limit: int = 14) -> list[Moment]:
+    """
+    The handful of events worth reading first, in time order.
+
+    Boot and logon anchor the story; everything Insights flagged is pinned to
+    when its process started; the busiest minute and the programs started just
+    before the capture are where an intrusion in progress usually shows.
+    """
+    if not events:
+        return []
+    moments: list[Moment] = []
+    starts = [e for e in events if e.kind == "process"]
+
+    boot = next((e for e in starts if e.pid == "4" or e.process.lower() == "system"), None) \
+        or next((e for e in starts if e.process.lower() == "smss.exe"), None)
+    if boot:
+        moments.append(Moment(boot.time, "Windows started",
+                              f"{boot.process} was created; this is the boot time.",
+                              pid=boot.pid))
+    logon = next((e for e in starts if e.process.lower() in ("userinit.exe", "explorer.exe")),
+                 None)
+    if logon:
+        moments.append(Moment(logon.time, "User logged on",
+                              f"{logon.process} started (PID {logon.pid}), which happens "
+                              "when someone signs in at the console.", pid=logon.pid))
+
+    # The most severe finding per process, pinned to the process's start.
+    severity = {"high": 0, "medium": 1, "low": 2, "info": 3}
+    worst: dict[str, object] = {}
+    for finding in findings or ():
+        if finding.pid and finding.severity in ("high", "medium"):
+            current = worst.get(finding.pid)
+            if current is None or severity[finding.severity] < severity[current.severity]:
+                worst[finding.pid] = finding
+    first_start = {}
+    for event in starts:
+        first_start.setdefault(event.pid, event)
+    for pid, finding in worst.items():
+        event = first_start.get(pid)
+        if event is None:
+            continue
+        moments.append(Moment(event.time, f"Flagged process started: {event.process}",
+                              f"PID {pid}. Insights: {finding.title}.", "alert", pid))
+    flagged_net = [e for e in events if e.kind == "network" and e.pid in worst]
+    for event in flagged_net[:3]:
+        moments.append(Moment(event.time, f"{event.process or 'PID ' + event.pid} "
+                              "made a connection", event.summary, "alert", event.pid))
+
+    # The busiest minute, when it stands well above the rest.
+    per_minute = Counter(e.time.replace(second=0, microsecond=0) for e in events)
+    if per_minute:
+        minute, count = per_minute.most_common(1)[0]
+        typical = sorted(per_minute.values())[len(per_minute) // 2]
+        # Every boot is a burst; only one later on says something.
+        after_boot = boot is None or minute - boot.time > timedelta(minutes=2)
+        if count >= 5 and count >= 3 * typical and after_boot:
+            kinds = Counter(e.kind for e in events
+                            if e.time.replace(second=0, microsecond=0) == minute)
+            parts = ", ".join(f"{n} {_COUNTED.get(k, k)}" for k, n in kinds.most_common(4))
+            moments.append(Moment(minute, f"Busiest minute: {count} events", parts))
+
+    end = captured or events[-1].time
+    late = [e for e in starts if end - _LATE_WINDOW <= e.time <= end]
+    if late:
+        names = list(dict.fromkeys(e.process for e in late if e.process))
+        shown = ", ".join(names[:6]) + (f" and {len(names) - 6} more" if len(names) > 6 else "")
+        moments.append(Moment(late[0].time,
+                              f"{len(late)} program start{'' if len(late) == 1 else 's'} "
+                              "in the last 10 minutes",
+                              f"Started shortly before the capture: {shown}."))
+    moments.append(Moment(
+        end, "Memory captured",
+        "System time recorded in the image when it was taken." if captured else
+        "Latest timestamp in the analysed output; the capture was at or after this."))
+
+    moments.sort(key=lambda m: (m.time, m.tone != "alert"))
+    if len(moments) > limit:
+        keep = [m for m in moments if m.tone == "alert"][:limit - 3]
+        rest = [m for m in moments if m.tone != "alert"]
+        moments = sorted(keep + rest[:limit - len(keep)], key=lambda m: m.time)
+    return moments
 
 
 def missing_inputs(available_plugins: set[str]) -> list[str]:

@@ -100,3 +100,42 @@ def test_clicking_a_tile_emits_its_plugin_id(ribbon):
     plugin_id = next(iter(ribbon._buttons))
     ribbon._buttons[plugin_id].clicked.emit(plugin_id)
     assert received == [plugin_id]
+
+
+def test_a_running_compact_tile_does_not_squeeze_in_a_badge(ribbon):
+    """
+    A compact tile has no room for the badge line; showing it squashed the
+    label into the icon. Running is shown by the tile's state and tooltip.
+    """
+    plugin_id = next(iter(ribbon._buttons))
+    tile = ribbon._buttons[plugin_id]
+    ribbon.set_running(plugin_id, True)
+    assert tile.badge_lbl.isHidden()
+    assert "Running" in tile.toolTip()
+    ribbon.set_compact(False)
+    assert not tile.badge_lbl.isHidden() and tile.badge_lbl.text() == "Running"
+    ribbon.set_running(plugin_id, False)
+    assert "Running" not in tile.toolTip()
+
+
+def test_tile_density_is_remembered(qapp, registry, tmp_path):
+    from core import settings
+    from core.case import Case
+    from ui.main_window import MainWindow
+    window = MainWindow(Case.quick(str(tmp_path)), registry=registry)
+    try:
+        assert window.ribbon.compact and window.compact_action.isChecked()
+        window.compact_action.trigger()
+        assert not window.ribbon.compact
+        assert settings.load(refresh=True)["compact_tiles"] is False
+    finally:
+        if window._os_probe is not None:
+            window._os_probe.cancel()
+        window.close()
+    reopened = MainWindow(Case.quick(str(tmp_path)), registry=registry)
+    try:
+        assert not reopened.ribbon.compact and not reopened.compact_action.isChecked()
+    finally:
+        if reopened._os_probe is not None:
+            reopened._os_probe.cancel()
+        reopened.close()

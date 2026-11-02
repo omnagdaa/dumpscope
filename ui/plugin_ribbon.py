@@ -3,8 +3,8 @@ The plugin ribbon: every module that can be run against the loaded image,
 grouped by category and scoped to the image's operating system.
 
 It was previously built inline in MainWindow and torn down and rebuilt from
-scratch whenever the OS changed, which meant every tile — and the state of any
-run in flight — was destroyed along with it. Here the tiles are built once per
+scratch whenever the OS changed, which meant every tile (and the state of any
+run in flight) was destroyed along with it. Here the tiles are built once per
 OS and shown or hidden by the filter, so a running plugin keeps its badge while
 the examiner searches for the next one.
 
@@ -175,7 +175,7 @@ class PluginRibbon(QWidget):
         from ui.plugin_button import PluginButton   # local: avoids a cycle
 
         groups = self.registry.ribbon(os_name)
-        for index, (category, color, plugins) in enumerate(groups):
+        for index, (category, _color, plugins) in enumerate(groups):
             group = QWidget()
             group.setObjectName("ribbonGroup")
             column = QVBoxLayout(group)

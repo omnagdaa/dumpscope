@@ -2,7 +2,7 @@
 Stands in for the vol3 CLI.
 
 Emits CSV through the same writer configuration vol3's CSVRenderer uses, so the
-values exercised here — embedded commas, embedded newlines, empty cells — are
+values exercised here (embedded commas, embedded newlines, empty cells) are
 shaped exactly as the real renderer would shape them. Progress is written to
 stderr in vol3's \r-terminated format.
 
@@ -11,12 +11,17 @@ Modes: `rows` (default), `chatty` (megabytes of stderr), `fail` (non-zero exit),
 `corrupt` (fails with a corrupted-cache error unless --clear-cache is passed),
 `corrupt_always`, `garbage` (invalid UTF-8), `empty` (no output),
 `header_only`, `ragged` (rows shorter and longer than the header),
-`flood` (more rows than a pipe buffer, for cancel-while-blocked).
+`flood` (more rows than a pipe buffer, for cancel-while-blocked),
+`locked` (fails once with a locked identifier cache; the --stub-marker file
+records that it has), `stalled` (the same, with vol3's message for a symbol
+download that was cut off), `ignore_term` (ignores SIGTERM and sleeps).
 """
 import csv
 import os
 import sys
 import time
+
+sys.stdout.reconfigure(newline="\n")    # as _CLI_ENTRY does for vol3
 
 mode = "rows"
 for index, arg in enumerate(sys.argv):
@@ -32,7 +37,7 @@ def _arg(name, default=""):
 
 
 # STUB_VOL_FIXTURES=1: answer as vol3 would for the plugin named on the command
-# line, from tests/vol_fixtures.py — the end-to-end tests run real windows
+# line, from tests/vol_fixtures.py: the end-to-end tests run real windows
 # against this. STUB_VOL_ARGV_LOG records each command line for inspection.
 if os.environ.get("STUB_VOL_FIXTURES"):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -48,9 +53,10 @@ if os.environ.get("STUB_VOL_FIXTURES"):
         if os.environ.get("STUB_FETCH_ISF") and symbol_dirs:
             target = os.path.join(symbol_dirs[0], "windows", "ntkrnlmp.pdb")
             os.makedirs(target, exist_ok=True)
+            import lzma
             with open(os.path.join(target, "3844DBB920174967BE7AA4A2C20430FA-2.json.xz"),
                       "wb") as handle:
-                handle.write(b"\xfd7zXZ\x00stub")
+                handle.write(lzma.compress(b'{"symbols": {}}'))
         elif os.environ.get("STUB_INFO_FAIL"):
             sys.stderr.write("Unable to validate the plugin requirements: "
                              "symbol table not found\n")
@@ -72,14 +78,14 @@ if os.environ.get("STUB_VOL_FIXTURES"):
 if mode == "slow":
     trace = _arg("--stub-trace")
     if trace:
-        with open(trace, "a") as handle:
+        with open(f"{trace}.{os.getpid()}", "a") as handle:
             handle.write(f"start {os.getpid()} {time.monotonic()}\n")
     print("PID,Name")
     for i in range(3):
         print(f"{i},slow{i}", flush=True)
         time.sleep(float(_arg("--stub-delay", "0.3")))
     if trace:
-        with open(trace, "a") as handle:
+        with open(f"{trace}.{os.getpid()}", "a") as handle:
             handle.write(f"end {os.getpid()} {time.monotonic()}\n")
     sys.exit(0)
 
@@ -92,6 +98,36 @@ if mode in ("corrupt", "corrupt_always"):
     sys.stderr.write("Traceback (most recent call last):\n")
     sys.stderr.write("sqlite3.DatabaseError: database disk image is malformed\n")
     sys.exit(1)
+
+if mode == "locked":
+    marker = _arg("--stub-marker")
+    if marker and not os.path.exists(marker):
+        open(marker, "w").close()
+        sys.stderr.write("sqlite3.OperationalError: database is locked\n")
+        sys.exit(1)
+    print("PID,Name")
+    print("4,System")
+    sys.exit(0)
+
+if mode == "stalled":
+    marker = _arg("--stub-marker")
+    if marker and not os.path.exists(marker):
+        open(marker, "w").close()
+        sys.stderr.write("WARNING  volatility3.framework.plugins: Automagic exception "
+                         "occurred: ValueError: Cached file did not download completely\n"
+                         "Unable to validate the plugin requirements: "
+                         "['plugins.PsList.kernel.symbol_table_name']\n")
+        sys.exit(1)
+    print("PID,Name")
+    print("4,System")
+    sys.exit(0)
+
+if mode == "ignore_term":
+    import signal
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    print("PID,Name", flush=True)
+    time.sleep(60)
+    sys.exit(0)
 
 if mode == "garbage":
     sys.stdout.buffer.write(b"PID,Name\n4,\xff\xfe\xfdbad\n5,ok\n")

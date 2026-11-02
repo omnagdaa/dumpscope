@@ -13,6 +13,8 @@ from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
+from ui import dialogs
+
 from core import vol_runner
 from core.case import Case
 from core.insights import analyse
@@ -323,8 +325,7 @@ def window(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(vol_runner, "find_vol3_command", lambda: [sys.executable, STUB])
     monkeypatch.setenv("STUB_VOL_FIXTURES", "1")
     for kind in ("warning", "critical", "information", "question"):
-        monkeypatch.setattr(QMessageBox, kind, staticmethod(
-            lambda *a, **k: QMessageBox.StandardButton.No))
+        monkeypatch.setattr(dialogs, kind, lambda *a, **k: QMessageBox.StandardButton.No)
     image = tmp_path / "host.raw"
     image.write_bytes(b"\0" * 4096)
     case = Case.create(str(tmp_path), "E2E", image_path=str(image))
@@ -332,6 +333,7 @@ def window(qapp, tmp_path, monkeypatch):
     if win._os_probe is not None:
         win._os_probe.cancel()
         win._os_probe.wait(5000)
+    assert _pump(lambda: not win.analysis_busy)     # the first rebuild is async too
     yield win
     win.close()
 
@@ -346,7 +348,7 @@ def test_new_case_starts_with_empty_analysis_tabs(window):
 def test_collect_fills_timeline_and_insights(window):
     plugins = list(dict.fromkeys(window.timeline_view.missing + window.insights_view.missing))
     window._collect(plugins)
-    assert _pump(lambda: not window._runners, 60)
+    assert _pump(lambda: not window._runners and not window.analysis_busy, 60)
     assert len(window.timeline_view.events) == 25
     assert window.insights_view.findings
     assert window.timeline_view.missing == [] and window.insights_view.missing == []
@@ -369,22 +371,21 @@ def test_collect_without_an_image_does_nothing(window):
 
 def test_bookmarking_an_insight(window):
     window._collect(["windows.pslist.PsList", "windows.psscan.PsScan"])
-    assert _pump(lambda: not window._runners, 60)
+    assert _pump(lambda: not window._runners and not window.analysis_busy, 60)
     finding = next(f for f in window.insights_view.findings if f.category == "Hidden process")
     window._bookmark_insight(finding)
     [bookmark] = window.db.get_bookmarks()
     assert bookmark["tag"] == "Suspicious" and bookmark["label"] == finding.title
 
 
-def test_deleting_a_result_updates_the_views(window):
+def test_deleting_a_result_updates_the_views(window, monkeypatch):
     window._collect(["windows.pslist.PsList"])
-    assert _pump(lambda: not window._runners, 60)
+    assert _pump(lambda: not window._runners and not window.analysis_busy, 60)
     assert window.timeline_view.events
-    from PyQt6.QtWidgets import QMessageBox as Box
-    import ui.main_window as mw
-    mw.QMessageBox.question = staticmethod(lambda *a, **k: Box.StandardButton.Yes)
+    monkeypatch.setattr(dialogs, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     result_id = window.db.get_results()[0]["id"]
     window._delete_stored_result(result_id)
+    assert _pump(lambda: not window.analysis_busy)
     assert window.timeline_view.events == []
 
 
@@ -401,7 +402,7 @@ def test_quick_analysis_timeline_uses_open_tabs(qapp, tmp_path, monkeypatch):
         window._os_probe.cancel()
         window._os_probe.wait(5000)
     window._collect(["windows.pslist.PsList"])
-    assert _pump(lambda: not window._runners, 60)
+    assert _pump(lambda: not window._runners and not window.analysis_busy, 60)
     assert len(window.timeline_view.events) == 13
     window._bookmark_insight(analyse(all_payloads())[0])      # no database: no crash
     window.close()
@@ -420,7 +421,7 @@ def test_email_is_gone(window):
 def test_generate_report_from_the_window(window, monkeypatch):
     from ui import report_dialog
     window._collect(["windows.pslist.PsList"])
-    assert _pump(lambda: not window._runners, 60)
+    assert _pump(lambda: not window._runners and not window.analysis_busy, 60)
     opened = []
     def run_inline(dialog):
         opened.append(dialog)
@@ -436,8 +437,7 @@ def test_generate_report_from_the_window(window, monkeypatch):
 def test_quick_analysis_cannot_generate_a_report(qapp, tmp_path, monkeypatch):
     from ui.main_window import MainWindow
     told = []
-    monkeypatch.setattr(QMessageBox, "information",
-                        staticmethod(lambda *a, **k: told.append(a[1])))
+    monkeypatch.setattr(dialogs, "information", lambda *a, **k: told.append(a[1]))
     window = MainWindow(Case.quick(str(tmp_path)), registry=PluginRegistry(None))
     window._generate_report()
     assert told == ["No Case"]

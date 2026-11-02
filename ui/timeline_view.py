@@ -11,7 +11,7 @@ types from the legend.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from PyQt6.QtCore import (
     QAbstractTableModel, QDateTime, QModelIndex, QPointF, QRectF, Qt, QTimeZone,
@@ -19,18 +19,54 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QDateTimeEdit, QFileDialog, QFormLayout, QFrame,
-    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
-    QSplitter, QStackedWidget, QTableView, QToolTip, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QDateTimeEdit, QFileDialog, QFormLayout, QFrame,
+    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QPushButton, QSplitter, QStackedWidget, QTableView,
+    QTextBrowser, QToolTip, QVBoxLayout, QWidget,
 )
 
 from core.report_bundle import write_csv
 from core.timeline import (
-    EVENT_COLUMNS, KIND_COLORS, KIND_LABELS, KINDS, Event, build_events,
-    filter_events, format_time, histogram,
+    EVENT_COLUMNS, KIND_COLORS, KIND_HELP, KIND_LABELS, KINDS, Event, Moment,
+    build_events, filter_events, format_time, histogram, key_moments,
 )
 from ui import icons
 from ui.theme import palette, plain, readable
+
+
+def how_it_works_html(dim: str) -> str:
+    """The "How the timeline works" page."""
+    kinds = "".join(
+        f"<tr><td style='padding:3px 12px 3px 0;white-space:nowrap'>"
+        f"<span style='color:{KIND_COLORS[key]}'>&#9632;</span> {label}</td>"
+        f"<td style='padding:3px 0'>{KIND_HELP.get(key, '')}</td></tr>"
+        for key, label, _ in KINDS if key in KIND_HELP)
+    return (
+        "<h2>How the timeline works</h2>"
+        "<p>Memory holds many timestamps: when each process started and ended, when "
+        "each DLL was loaded, when each network connection was opened, when each "
+        "user's first process started. The timeline gathers every timestamp from the plugins you "
+        "have run on this image, turns each into one event and sorts them. Nothing "
+        "is guessed or inferred; every row points back to the plugin output it "
+        "came from (double-click it).</p>"
+        "<p><b>The chart</b> counts events per time slice, one coloured layer per "
+        "kind of event. A tall bar is a burst of activity; most bursts are a "
+        "program starting and loading its DLLs. Drag across the chart to zoom in, "
+        "scroll to zoom, double-click to see everything again.</p>"
+        "<p><b>Key moments</b>, on the left, are the events worth reading first: "
+        "when the machine booted, when users logged on, when every process Insights "
+        "flagged was started, the busiest minute, the programs started in the last "
+        "minutes before the capture, and the capture itself. Click one to jump "
+        "there. Red marks something Insights flagged; the same lines appear on the "
+        "chart.</p>"
+        "<p><b>Only flagged processes</b> hides everything that does not belong to "
+        "a process Insights flagged, which is usually the fastest way to read an "
+        "intrusion as a story.</p>"
+        f"<p style='color:{dim}'>Times are UTC as Windows recorded them. A clock "
+        "that was wrong on the machine is wrong here too. Events that left no "
+        "trace in memory (a process that exited long ago) are not on the "
+        "timeline.</p>"
+        f"<h3>Kinds of event</h3><table>{kinds}</table>")
 
 
 def _tick_label(moment: datetime, span: timedelta) -> str:
@@ -84,7 +120,7 @@ def _to_qt(moment: datetime) -> QDateTime:
 
 
 def _from_qt(value: QDateTime) -> datetime:
-    return datetime.fromtimestamp(value.toMSecsSinceEpoch() / 1000, timezone.utc)
+    return datetime.fromtimestamp(value.toMSecsSinceEpoch() / 1000, UTC)
 
 
 class TimeRangePopup(QFrame):
@@ -225,6 +261,7 @@ class TimelineChart(QWidget):
         self._drag_from: float | None = None
         self._drag_to: float | None = None
         self._colors = palette(True)
+        self._markers: list[Moment] = []
 
     # ── Data ──────────────────────────────────────────────────────────────────
 
@@ -240,6 +277,11 @@ class TimelineChart(QWidget):
         else:
             self._start = self._end = None
         self._rebin()
+
+    def set_markers(self, moments: list[Moment]):
+        """Key moments, drawn as thin lines over the bars."""
+        self._markers = list(moments)
+        self.update()
 
     def set_kinds(self, kinds: set[str]):
         self._kinds = set(kinds)
@@ -347,6 +389,22 @@ class TimelineChart(QWidget):
                 box, align = (QRectF(x - 70, rect.bottom() + 4, 140, 18),
                               Qt.AlignmentFlag.AlignHCenter)
             p.drawText(box, align | Qt.AlignmentFlag.AlignTop, _tick_label(moment, span))
+
+        span_s = self._span().total_seconds()
+        for moment in self._markers:
+            if not self._start <= moment.time <= self._end:
+                continue
+            x = rect.left() + rect.width() * (moment.time - self._start).total_seconds() / span_s
+            colour = QColor(colors["danger"] if moment.tone == "alert" else colors["text_faint"])
+            pen = QPen(colour, 1, Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.drawLine(QPointF(x, rect.top() + 6), QPointF(x, rect.bottom()))
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(colour)
+            p.drawPolygon([QPointF(x - 4, rect.top()), QPointF(x + 4, rect.top()),
+                           QPointF(x, rect.top() + 6)])
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
         if self._drag_from is not None and self._drag_to is not None:
             left, right = sorted((self._drag_from, self._drag_to))
@@ -458,6 +516,9 @@ class TimelineView(QWidget):
         super().__init__(parent)
         self.events: list[Event] = []
         self.missing: list[str] = []
+        self.moments: list[Moment] = []
+        self.flagged: set[str] = set()
+        self.dark = True
         self._kinds = {k for k, _, _ in KINDS}
         self._range = (None, None)
         self._chips: dict[str, QPushButton] = {}
@@ -498,7 +559,12 @@ class TimelineView(QWidget):
         self.reset_btn.clicked.connect(self.reset_zoom)
         self.export_btn = QPushButton("Export CSV…")
         self.export_btn.clicked.connect(self._export)
-        for button in (self.range_btn, self.reset_btn, self.export_btn, self.collect_btn):
+        self.how_btn = QPushButton("How It Works")
+        self.how_btn.setCheckable(True)
+        self.how_btn.setToolTip("Where the events come from and how to read the chart")
+        self.how_btn.toggled.connect(self._toggle_how)
+        for button in (self.range_btn, self.reset_btn, self.export_btn, self.collect_btn,
+                       self.how_btn):
             header.addWidget(button)
         layout.addLayout(header)
 
@@ -515,7 +581,7 @@ class TimelineView(QWidget):
         heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_lbl = QLabel(
             "The timeline is built from plugin output already in the case: "
-            "process creation and exit, DLL loads, network connections, logon "
+            "process creation and exit, DLL loads, network connections, user "
             "sessions and program execution. Run Process List, DLL List and "
             "Net Scan, or collect everything it uses in one go.")
         self.empty_lbl.setObjectName("launcherEmptyText")
@@ -550,10 +616,15 @@ class TimelineView(QWidget):
             chip.setObjectName("timelineChip")
             chip.setProperty("kind", key)
             chip.setIcon(_swatch(color))
+            chip.setToolTip(KIND_HELP.get(key, ""))
             chip.toggled.connect(lambda on, k=key: self._toggle_kind(k, on))
             self._chips[key] = chip
             legend.addWidget(chip)
         legend.addStretch()
+        self.flagged_chk = QCheckBox("Only flagged processes")
+        self.flagged_chk.setToolTip("Show only events of processes that Insights flagged")
+        self.flagged_chk.toggled.connect(lambda _: self._apply())
+        legend.addWidget(self.flagged_chk)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Filter by process, PID, path or address")
         self.search.setClearButtonEnabled(True)
@@ -595,12 +666,71 @@ class TimelineView(QWidget):
         split.addWidget(table_box)
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
-        body_layout.addWidget(split, 1)
+
+        moments_box = QWidget()
+        moments_layout = QVBoxLayout(moments_box)
+        moments_layout.setContentsMargins(0, 0, 0, 0)
+        moments_layout.setSpacing(4)
+        moments_title = QLabel("Key moments")
+        moments_title.setObjectName("panelStage")
+        moments_layout.addWidget(moments_title)
+        self.moment_list = QListWidget()
+        self.moment_list.setWordWrap(True)
+        self.moment_list.setSpacing(4)
+        self.moment_list.setObjectName("momentList")
+        self.moment_list.setToolTip("The events worth reading first. Click one to zoom there.")
+        self.moment_list.itemClicked.connect(self._moment_clicked)
+        moments_layout.addWidget(self.moment_list, 1)
+
+        outer = QSplitter(Qt.Orientation.Horizontal)
+        outer.addWidget(moments_box)
+        outer.addWidget(split)
+        outer.setStretchFactor(0, 1)
+        outer.setStretchFactor(1, 4)
+        outer.setSizes([300, 1000])
+        body_layout.addWidget(outer, 1)
         self.stack.addWidget(body)
+
+        self.how = QTextBrowser()
+        self.how.setOpenExternalLinks(False)
+        self.stack.addWidget(self.how)
 
     # ── Data ──────────────────────────────────────────────────────────────────
 
+    def _toggle_how(self, on: bool):
+        if on:
+            self.how.setHtml(how_it_works_html(palette(self.dark)["text_dim"]))
+            self.stack.setCurrentIndex(2)
+        else:
+            self.stack.setCurrentIndex(1 if self.events else 0)
+
+    def _fill_moments(self):
+        self.moment_list.clear()
+        tokens = palette(self.dark)
+        for moment in self.moments:
+            item = QListWidgetItem(f"{format_time(moment.time)}\n{moment.title}")
+            item.setToolTip(plain(moment.detail))
+            item.setData(Qt.ItemDataRole.UserRole, moment)
+            if moment.tone == "alert":
+                item.setForeground(QColor(tokens["danger"]))
+            self.moment_list.addItem(item)
+        if not self.moments:
+            item = QListWidgetItem("Nothing stands out yet.")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.moment_list.addItem(item)
+
+    def _moment_clicked(self, item: QListWidgetItem):
+        moment = item.data(Qt.ItemDataRole.UserRole)
+        if moment is None:
+            return
+        window = timedelta(minutes=2)
+        self.zoom_to(moment.time - window, moment.time + window)
+
     def set_dark(self, dark: bool):
+        self.dark = dark
+        self._fill_moments()
+        if self.how_btn.isChecked():
+            self.how.setHtml(how_it_works_html(palette(dark)["text_dim"]))
         self.range_btn.setIcon(icons.icon("calendar", 14, palette(dark)["text_dim"]))
         self.chart.set_dark(dark)
         self.model.dark = dark
@@ -610,9 +740,18 @@ class TimelineView(QWidget):
         """Rebuild from stored output; keeps the zoom if it still makes sense."""
         self.set_events(build_events(payloads), missing)
 
-    def set_events(self, events: list[Event], missing: list[str] | None = None):
+    def set_events(self, events: list[Event], missing: list[str] | None = None,
+                   findings=(), captured: datetime | None = None):
+        """`findings` are Insights findings; their PIDs are marked as flagged."""
         self.events = events
         self.missing = list(missing or [])
+        self.flagged = {f.pid for f in findings if getattr(f, "pid", "")}
+        self.moments = key_moments(events, findings, captured)
+        self.chart.set_markers(self.moments)
+        self._fill_moments()
+        self.flagged_chk.setVisible(bool(self.flagged))
+        if not self.flagged:
+            self.flagged_chk.setChecked(False)
         start, end = self._range
         if events and start is not None and (end < events[0].time or start > events[-1].time):
             self._range = (None, None)
@@ -623,7 +762,8 @@ class TimelineView(QWidget):
         self.collect_btn.setEnabled(bool(self.missing))
         self.collect_btn.setVisible(bool(self.missing))
         self.collect_btn.setText(f"Collect Timeline Data ({len(self.missing)})")
-        self.stack.setCurrentIndex(1 if events else 0)
+        if not self.how_btn.isChecked():
+            self.stack.setCurrentIndex(1 if events else 0)
         self._apply()
 
     def zoom_to(self, start, end):
@@ -663,9 +803,12 @@ class TimelineView(QWidget):
 
     def _apply(self):
         start, end = self._range
+        events = self.events
+        if self.flagged_chk.isChecked() and self.flagged:
+            events = [e for e in events if e.pid in self.flagged]
         self.chart.set_kinds(self._kinds)
-        self.chart.set_events(self.events, start, end)
-        shown = filter_events(self.events, self._kinds, start, end, self.search.text())
+        self.chart.set_events(events, start, end)
+        shown = filter_events(events, self._kinds, start, end, self.search.text())
         self.model.set_events(shown)
         if self.events:
             first, last = self.events[0].time, self.events[-1].time

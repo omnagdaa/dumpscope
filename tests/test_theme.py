@@ -43,7 +43,7 @@ def test_the_two_stylesheets_differ_only_in_colour():
 def test_results_table_is_styled():
     """
     QTableWidget selectors do not match a plain QTableView, and the results
-    grid is a QTableView — it went unthemed for exactly this reason.
+    grid is a QTableView: it went unthemed for exactly this reason.
     """
     assert "QTableView" in theme.build(dark=True)
 
@@ -64,7 +64,7 @@ def test_widgets_do_not_hardcode_colours():
     for path in UI_DIR.glob("*.py"):
         if path.name in allowed:
             continue
-        found = re.findall(r"#[0-9a-fA-F]{6}", path.read_text())
+        found = re.findall(r"#[0-9a-fA-F]{6}", path.read_text(encoding="utf-8"))
         if found:
             offenders[path.name] = found
     assert not offenders, f"hardcoded colours outside the theme: {offenders}"

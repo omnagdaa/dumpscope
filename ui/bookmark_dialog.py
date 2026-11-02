@@ -1,7 +1,7 @@
 """
 Prompt for tagging a finding.
 
-Autopsy's value is not that it can list processes — it is that an examiner can
+Autopsy's value is not that it can list processes: it is that an examiner can
 mark a row, say why it matters, and have that survive into the report. This is
 the smallest form of that: a label, a tag from the case's vocabulary, and a
 free-text note.
@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
     QPlainTextEdit, QVBoxLayout,
 )
+from ui.theme import plain_label
 
 
 class BookmarkDialog(QDialog):
@@ -33,7 +34,7 @@ class BookmarkDialog(QDialog):
         layout.setContentsMargins(22, 20, 22, 18)
         layout.setSpacing(14)
 
-        heading = QLabel(self.plugin)
+        heading = plain_label(self.plugin)
         heading.setObjectName("dialogHeading")
         layout.addWidget(heading)
 
@@ -59,7 +60,8 @@ class BookmarkDialog(QDialog):
         form.addRow(QLabel("Notes"), self.notes_edit)
         layout.addLayout(form)
 
-        preview = QLabel(self._preview())
+        # Values straight from the image: shown as text, never as markup.
+        preview = plain_label(self._preview())
         preview.setWordWrap(True)
         preview.setObjectName("dialogBlurb")
         layout.addWidget(preview)

@@ -3,7 +3,7 @@ Image identification.
 
 The point of these is the ordering rule: a container signature outranks
 anything volatility3 concludes afterwards, and "banners found nothing" is not
-evidence of failure — it is weak evidence of Windows, because banners only ever
+evidence of failure: it is weak evidence of Windows, because banners only ever
 looks for Linux and Mac kernels.
 """
 
@@ -76,7 +76,7 @@ def test_parse_info_rows_survives_unexpected_output(stdout):
 
 def test_summary_marks_a_guess_as_a_guess():
     """
-    An assumed OS must not read like a detection — the examiner has to be able
+    An assumed OS must not read like a detection: the examiner has to be able
     to tell "vol3 confirmed this" from "nothing ruled it out".
     """
     assumed = ImageProfile(os="windows", confidence="assumed", method="nothing else matched")

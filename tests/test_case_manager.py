@@ -5,6 +5,7 @@ import pytest
 from core.case import Case, remember_case
 from ui.case_manager import CaseManager, _friendly_time
 from ui.case_tree import CaseTree
+from datetime import UTC
 
 
 @pytest.fixture(autouse=True)
@@ -54,8 +55,8 @@ def test_opening_a_recent_case_selects_it(qapp, tmp_path):
 
 
 def test_friendly_time_renders_relative_ages():
-    from datetime import datetime, timedelta, timezone
-    now = datetime.now(timezone.utc)
+    from datetime import datetime, timedelta
+    now = datetime.now(UTC)
     assert _friendly_time("") == ""
     assert _friendly_time((now - timedelta(seconds=5)).isoformat()) == "just now"
     assert _friendly_time((now - timedelta(minutes=10)).isoformat()) == "10 min ago"

@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup, QCheckBox, QDialog, QGroupBox, QHBoxLayout, QLabel, QLayout,
     QProgressBar, QPushButton, QRadioButton, QVBoxLayout,
 )
+from ui.theme import plain_label
 
 from core.report_bundle import (
     BundleCancelled, BundleOptions, BundleResult, build_bundle, bundle_dirname,
@@ -98,8 +99,8 @@ class ReportDialog(QDialog):
         dumps_layout = QVBoxLayout(dumps)
         dumps_layout.setSpacing(8)
         self.dump_group = QButtonGroup(self)
-        self.link_radio = QRadioButton("Include — hard-link when possible (no extra disk space)")
-        self.copy_radio = QRadioButton("Include — always copy (a fully independent folder)")
+        self.link_radio = QRadioButton("Include (hard-link when possible, no extra disk space)")
+        self.copy_radio = QRadioButton("Include (always copy into a self-contained folder)")
         self.none_radio = QRadioButton("Leave out (list them in the report only)")
         for mode, radio in (("link", self.link_radio), ("copy", self.copy_radio),
                             ("none", self.none_radio)):
@@ -124,7 +125,8 @@ class ReportDialog(QDialog):
         self.progress.setVisible(False)
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(8)
-        self.status_lbl = QLabel("")
+        # Carries warnings that quote paths from the case database.
+        self.status_lbl = plain_label("")
         self.status_lbl.setObjectName("reportOption")
         self.status_lbl.setWordWrap(True)
         layout.addWidget(self.progress)
@@ -213,7 +215,7 @@ class ReportDialog(QDialog):
     def _on_cancelled(self):
         self._finish_worker()
         self.progress.setVisible(False)
-        self.status_lbl.setText("Cancelled — nothing was left behind.")
+        self.status_lbl.setText("Cancelled. No partial report was left behind.")
         self.close_btn.setText("Close")
 
     def _close_or_cancel(self):

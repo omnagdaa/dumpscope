@@ -17,7 +17,7 @@ import logging
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 log = logging.getLogger("dumpscope.database")
 
@@ -164,7 +164,13 @@ def db_filename(case_name: str) -> str:
 
 
 class Database:
-    """Storage for one case. Not thread-safe; use it from the GUI thread."""
+    """
+    Storage for one case. Writes belong on the GUI thread.
+
+    Every call opens and closes its own connection, so a read-only call such
+    as latest_payloads may also run on a worker thread (the timeline and
+    insights rebuild does).
+    """
 
     def __init__(self, base_dir: str, case_name: str):
         os.makedirs(base_dir, exist_ok=True)
@@ -258,7 +264,7 @@ class Database:
         """
         Fold the duplicate case rows the old save-on-every-launch behaviour
         created into the earliest row. Results and bookmarks are repointed
-        first, so nothing is lost — only the redundant case rows go.
+        first, so nothing is lost: only the redundant case rows go.
 
         A migrated `cases` table keeps its original definition and so lacks the
         UNIQUE constraint a fresh one has; attach_case does not depend on it.
@@ -447,7 +453,7 @@ class Database:
         """
         The newest stored run of each plugin, newest first, as full payloads.
 
-        With `source_id`, only runs against that data source count — a
+        With `source_id`, only runs against that data source count: a
         timeline mixing two machines' images would be meaningless. A run
         whose stored JSON cannot be decoded is skipped, not fatal.
         """
@@ -481,7 +487,7 @@ class Database:
         Record a tagged finding.
 
         `row` is the full {column: value} mapping of the output line it was
-        taken from. Storing it — rather than a row index — is what lets the tag
+        taken from. Storing it (rather than a row index) is what lets the tag
         be followed back to its line after the plugin has been re-run against a
         different image, or after the table has been sorted.
         """
@@ -599,8 +605,8 @@ class Database:
     def remove_data_source(self, source_id: int):
         """
         Detach an image from the case. Results and bookmarks produced from it
-        are kept — deleting evidence of work already done is never the right
-        default — and simply lose their source link.
+        are kept (deleting evidence of work already done is never the right
+        default) and simply lose their source link.
         """
         with self._connect() as conn:
             row = conn.execute(
@@ -640,7 +646,7 @@ class Database:
         """
         Rename a tag, carrying every finding that uses it along.
 
-        Returns False if the new name is already taken — merging two tags is a
+        Returns False if the new name is already taken: merging two tags is a
         different decision from renaming one, and silently doing it would lose
         the distinction the examiner drew.
         """
@@ -671,7 +677,7 @@ class Database:
     def delete_tag(self, name: str, delete_findings: bool = False):
         """
         Remove a tag. By default the findings it was applied to are kept and
-        simply become untagged — deleting an examiner's recorded observations
+        simply become untagged: deleting an examiner's recorded observations
         as a side effect of tidying a label would be the wrong default.
         """
         if self.case_id is None:
@@ -729,7 +735,7 @@ class Database:
             """INSERT INTO audit_log (case_id, action, detail, examiner, created_at)
                VALUES (?, ?, ?, ?, ?)""",
             (self.case_id, action, detail, examiner,
-             datetime.now(timezone.utc).isoformat(timespec="seconds")),
+             datetime.now(UTC).isoformat(timespec="seconds")),
         )
 
     # ── Extracted files ───────────────────────────────────────────────────────

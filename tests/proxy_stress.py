@@ -3,7 +3,7 @@ Drive a result table the way a live analysis session does, in a subprocess.
 
 Run as a script; exits 0 if it survived. It lives outside the test modules
 because the failure it guards against is a segmentation fault, which takes the
-whole test runner down with it — the only way to assert on it is to watch a
+whole test runner down with it: the only way to assert on it is to watch a
 child process's exit code.
 """
 

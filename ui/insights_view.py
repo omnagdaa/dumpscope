@@ -21,8 +21,56 @@ from PyQt6.QtWidgets import (
 
 from ui.theme import palette, plain, readable, restyle
 from core.insights import (
-    FINDING_COLUMNS, SEVERITIES, SEVERITY_COLORS, Finding, analyse, counts,
+    FINDING_COLUMNS, RULES, SEVERITIES, SEVERITY_COLORS, Finding, analyse, counts,
+    rule_for, rule_status,
 )
+
+
+def _plugin_label(plugin: str) -> str:
+    return plugin.rsplit(".", 1)[-1]
+
+
+def how_it_works_html(have: set[str], findings: list[Finding], dim: str,
+                      ok: str, warn: str) -> str:
+    """The "How Insights work" page: what the rules are, and which of them ran."""
+    rows = []
+    for rule, ran, produced, missing in rule_status(have, findings):
+        if ran:
+            state = (f"<span style='color:{warn}'><b>{produced} flagged</b></span>"
+                     if produced else f"<span style='color:{ok}'>Ran, nothing flagged</span>")
+        else:
+            needs = ", ".join(_plugin_label(m) for m in missing)
+            state = f"<span style='color:{dim}'>Waiting for {html.escape(needs)}</span>"
+        attack = ", ".join(f"{i}" for i, _ in rule.attack)
+        rows.append(
+            f"<tr><td style='padding:6px 14px 6px 0;vertical-align:top'><b>"
+            f"{html.escape(rule.name)}</b><br><span style='color:{dim}'>{attack}</span></td>"
+            f"<td style='padding:6px 14px 6px 0;vertical-align:top'>{html.escape(rule.checks)}</td>"
+            f"<td style='padding:6px 0;vertical-align:top;white-space:nowrap'>{state}</td></tr>")
+    ran = sum(1 for _, r, _, _ in rule_status(have, findings) if r)
+    return (
+        "<h2>How Insights work</h2>"
+        "<p>Insights is a set of fixed rules, not machine learning and not a "
+        "malware verdict. Each rule reads the output of plugins you have already "
+        "run on this image and compares it against how a normal Windows system "
+        "looks: which parent starts which system process, where system programs "
+        "live on disk, which memory should never be both writable and executable, "
+        "and so on. Anything that does not match becomes a lead.</p>"
+        "<p>A lead is a place to look, not a conclusion. Every finding says why the "
+        "rule fired, how to confirm or dismiss it, and the innocent explanations "
+        "examiners meet most often.</p>"
+        "<p><b>Severity</b> is the rule's own weight: <i>High</i> means it rarely "
+        "has an innocent cause (a hidden process, injected code); <i>Medium</i> "
+        "deserves a look; <i>Low</i> and <i>Info</i> are context. Severities are "
+        "fixed per rule, so the same evidence always gets the same weight.</p>"
+        f"<p><b>{ran} of {len(RULES)} rules ran</b> on this image. A rule runs when "
+        "the plugins it reads have output; <i>Collect Insight Data</i> runs the "
+        "missing ones.</p>"
+        "<table width='100%' cellspacing='0'>"
+        f"<tr><th align='left' style='color:{dim}'>Rule</th>"
+        f"<th align='left' style='color:{dim}'>What it checks</th>"
+        f"<th align='left' style='color:{dim}'>On this image</th></tr>"
+        + "".join(rows) + "</table>")
 
 
 class FindingModel(QAbstractTableModel):
@@ -106,6 +154,8 @@ class InsightsView(QWidget):
         super().__init__(parent)
         self.findings: list[Finding] = []
         self.missing: list[str] = []
+        self.have: set[str] = set()
+        self.dark = True
         self._dim = palette(True)["text_dim"]
         self._build()
         self._apply()
@@ -132,6 +182,11 @@ class InsightsView(QWidget):
                                     "not been run on this image yet.")
         self.collect_btn.clicked.connect(lambda: self.collect_requested.emit(list(self.missing)))
         header.addWidget(self.collect_btn, 0, Qt.AlignmentFlag.AlignTop)
+        self.how_btn = QPushButton("How Insights Work")
+        self.how_btn.setCheckable(True)
+        self.how_btn.setToolTip("What the rules check, and which of them ran on this image")
+        self.how_btn.toggled.connect(self._toggle_how)
+        header.addWidget(self.how_btn, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(header)
 
         cards = QHBoxLayout()
@@ -215,20 +270,43 @@ class InsightsView(QWidget):
         split.setStretchFactor(1, 2)
         self.stack.addWidget(split)
 
+        self.how = QTextBrowser()
+        self.how.setOpenExternalLinks(False)
+        self.stack.addWidget(self.how)
+
     # ── Data ──────────────────────────────────────────────────────────────────
 
     def set_dark(self, dark: bool):
+        self.dark = dark
         self._dim = palette(dark)["text_dim"]
         self.model.dark = dark
         self.model.layoutChanged.emit()
         self._show_current()
+        self._fill_how()
+
+    def _fill_how(self):
+        tokens = palette(self.dark)
+        self.how.setHtml(how_it_works_html(
+            self.have, self.findings, tokens["text_dim"],
+            tokens["ok"], tokens["warn"]))
+
+    def _toggle_how(self, on: bool):
+        if on:
+            self._fill_how()
+            self.stack.setCurrentIndex(2)
+        else:
+            self.stack.setCurrentIndex(1 if self.findings else 0)
 
     def set_payloads(self, payloads: list[dict], missing: list[str] | None = None):
         self.set_findings(analyse(payloads), missing)
 
-    def set_findings(self, findings: list[Finding], missing: list[str] | None = None):
+    def set_findings(self, findings: list[Finding], missing: list[str] | None = None,
+                     have: set[str] | None = None):
+        """`have` is the plugins with stored output, for the How Insights Work page."""
         self.findings = findings
         self.missing = list(missing or [])
+        if have is not None:
+            self.have = set(have)
         tally = counts(findings)
         for severity, card in self.cards.items():
             card.set_count(tally.get(severity, 0))
@@ -246,7 +324,10 @@ class InsightsView(QWidget):
             self.summary_lbl.setText(
                 "Nothing flagged in the output run so far." if not self.missing else
                 "Run the plugins the rules read to see findings.")
-        self.stack.setCurrentIndex(1 if findings else 0)
+        if self.how_btn.isChecked():
+            self._fill_how()
+        else:
+            self.stack.setCurrentIndex(1 if findings else 0)
         self._apply()
 
     def _filter_to(self, severity: str):
@@ -298,7 +379,27 @@ class InsightsView(QWidget):
                f"{html.escape(finding.pid)})</span></p>"
                if finding.pid else "")
             + (f"<table>{evidence}</table>" if evidence else "")
-            + f"<p style='color:{dim}'>From {html.escape(finding.plugin)}</p>")
+            + self._rule_html(finding)
+            + f"<p style='color:{dim}'>Source: {html.escape(finding.plugin)}</p>")
+
+    def _rule_html(self, finding: Finding) -> str:
+        """Why the rule behind a finding matters, and how to check it."""
+        rule = rule_for(finding)
+        if rule is None:
+            return ""
+        dim = self._dim
+
+        def section(heading, text):
+            return (f"<p style='margin-bottom:2px'><b>{html.escape(heading)}</b></p>"
+                    f"<p style='margin-top:0'>{html.escape(text)}</p>")
+
+        attack = ", ".join(f"{i} {n}" for i, n in rule.attack)
+        return (f"<hr><p style='color:{dim}'>Rule: {html.escape(rule.name)}</p>"
+                + section("What the rule checks", rule.checks)
+                + section("Why it matters", rule.why)
+                + section("How to check it", rule.verify)
+                + section("Common innocent causes", rule.noise)
+                + (section("MITRE ATT&CK", attack) if attack else ""))
 
     def _bookmark(self):
         finding = self.current()

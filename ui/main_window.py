@@ -9,7 +9,7 @@ import os
 import time
 
 
-from PyQt6.QtCore import Qt, QTimer, QUrl
+from PyQt6.QtCore import QThread, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QApplication, QColorDialog, QDockWidget, QFileDialog, QFontDialog,
@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from ui import dialogs
 from core import settings
 from core.case import Case
 from core.database import Database
@@ -27,7 +28,10 @@ from core.plugins import PluginRegistry, build_command_args
 from core.os_detect import ImageProbe, ImageProfile
 from core.vol_runner import RUN_GATE, RunSpec, VolatilityRunner
 from core.hash_worker import FileHasher, HashWorker
+from core.insights import analyse
 from core.insights import missing_inputs as insight_missing_inputs
+from core.memory_map import MEMORY_PLUGIN, latest_payload, programs_from_payload
+from core.timeline import build_events, capture_time
 from core.timeline import missing_inputs as timeline_missing_inputs
 from ui.bookmark_dialog import BookmarkDialog
 from ui.case_tree import CaseTree
@@ -38,11 +42,12 @@ from ui.plugin_ribbon import PluginRibbon
 from ui.result_panel import ResultPanel
 from ui.result_tabs import ResultTabs
 from ui.insights_view import InsightsView
+from ui.memory_view import MemoryUsageView
 from ui.timeline_view import TimelineView
 from ui import icons
 from ui.theme import (
-    BASE_FONT_SIZE, build as build_theme, fonts as theme_fonts, palette, restyle,
-    set_fonts,
+    BASE_FONT_SIZE, build as build_theme, fonts as theme_fonts, palette, plain_label,
+    restyle, set_fonts,
 )
 
 log = logging.getLogger("dumpscope.main_window")
@@ -85,6 +90,10 @@ class MainWindow(QMainWindow):
         self._panels: dict[str, ResultPanel] = {}
         self._os_probe: ImageProbe | None = None
         self.active_source_id: int | None = None
+        # Timeline and insights are rebuilt off the GUI thread; a request made
+        # while one rebuild runs is remembered and served when it ends.
+        self._analysis_builder: AnalysisBuilder | None = None
+        self._analysis_stale = False
 
         self.settings = settings.load()
         set_fonts(self.settings.get("ui_font", ""),
@@ -99,12 +108,12 @@ class MainWindow(QMainWindow):
         self._build()
         self.apply_theme()
 
-        self.setWindowTitle(f"DumpScope — {self.case.display_label}")
+        self.setWindowTitle(f"{self.case.display_label} - DumpScope")
         self.resize(1480, 900)
 
         if not self.registry.available:
             self._show_status(
-                "volatility3 could not be inspected — plugin arguments are unknown."
+                "volatility3 could not be inspected, so plugin arguments are unknown."
             )
         else:
             self._show_status("Ready. Select a plugin to begin analysis.")
@@ -130,7 +139,7 @@ class MainWindow(QMainWindow):
             return db
         except Exception as exc:
             log.exception("Could not open the case database")
-            QMessageBox.warning(
+            dialogs.warning(
                 self, "Case Database",
                 f"The case database could not be opened:\n\n{exc}\n\n"
                 "Analysis will run, but results will not be saved.",
@@ -195,7 +204,8 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.ribbon = PluginRibbon(self.registry, compact=True)
+        self.ribbon = PluginRibbon(
+            self.registry, compact=bool(self.settings.get("compact_tiles", True)))
         self.ribbon.plugin_clicked.connect(self._on_plugin_clicked)
         self.ribbon.theme_toggled.connect(self.toggle_theme)
         self.ribbon.palette_requested.connect(self.open_command_palette)
@@ -230,6 +240,11 @@ class MainWindow(QMainWindow):
             lambda event: self._show_plugin_output(event.plugin))
         self.tabs.add_result_tab(self.timeline_view, "Timeline",
                                  closable=False, pinned=True)
+        self.memory_view = MemoryUsageView()
+        self.memory_view.collect_requested.connect(self._collect)
+        self.memory_view.show_process.connect(self._show_process)
+        self.tabs.add_result_tab(self.memory_view, "Memory Usage",
+                                 closable=False, pinned=True)
         self.tabs.setCurrentIndex(0)
         self._refresh_image_facts()
         root.addWidget(self.tabs, 1)
@@ -248,7 +263,7 @@ class MainWindow(QMainWindow):
         The left sidebar: the case header, the case explorer, and the tag index.
 
         Quick Analysis has no database, so it has no sources, results or tags
-        to explore — but it still has an image and a detected OS, so the header
+        to explore, but it still has an image and a detected OS, so the header
         is built either way and only the navigation below it is conditional.
         """
         container = QWidget()
@@ -355,7 +370,7 @@ class MainWindow(QMainWindow):
             log.warning("Could not refresh the case tree: %s", exc)
 
     def _result_panels(self) -> list[ResultPanel]:
-        """Every open results tab. Empty before the tab bar exists — the case
+        """Every open results tab. Empty before the tab bar exists: the case
         dock is built first and refreshes itself on the way up."""
         tabs = getattr(self, "tabs", None)
         if tabs is None:
@@ -369,7 +384,7 @@ class MainWindow(QMainWindow):
 
     def _activate_source(self, source_id: int, path: str):
         if not os.path.exists(path):
-            QMessageBox.critical(
+            dialogs.critical(
                 self, "Image Missing",
                 f"This data source is no longer on disk:\n\n{path}",
             )
@@ -388,7 +403,7 @@ class MainWindow(QMainWindow):
         source = self.db.get_data_source(source_id) if self.db else None
         if source is None:
             return
-        answer = QMessageBox.question(
+        answer = dialogs.question(
             self, "Remove Data Source",
             f"Remove this image from the case?\n\n{source['path']}\n\n"
             "The file itself is not deleted, and results already produced from "
@@ -409,7 +424,7 @@ class MainWindow(QMainWindow):
     def _hash_source(self, source_id: int, path: str):
         """Hash an image in the background and record the digests."""
         if not os.path.exists(path):
-            QMessageBox.critical(self, "Image Missing", f"Not on disk:\n\n{path}")
+            dialogs.critical(self, "Image Missing", f"Not on disk:\n\n{path}")
             return
         if getattr(self, "_hash_worker", None) is not None:
             self._show_status("A hash is already in progress.")
@@ -418,7 +433,7 @@ class MainWindow(QMainWindow):
         self._show_status(f"Hashing {os.path.basename(path)}…")
         worker = HashWorker(path, parent=self)
         worker.progress.connect(
-            lambda pct: self._show_status(f"Hashing {os.path.basename(path)} — {pct}%")
+            lambda pct: self._show_status(f"Hashing {os.path.basename(path)}: {pct}%")
         )
         worker.hashes_ready.connect(
             lambda md5, sha256, sid=source_id: self._on_hashes(sid, md5, sha256)
@@ -438,7 +453,7 @@ class MainWindow(QMainWindow):
             self.case.save()
             self._refresh_evidence()
         self._refresh_case_tree()
-        self._show_status(f"Hashed — MD5 {md5[:16]}…")
+        self._show_status(f"Hashed. MD5 {md5[:16]}...")
         self.notifier.notify(
             "Hashing finished", f"MD5 {md5[:16]}…  ·  SHA-256 {sha256[:16]}…",
             "success",
@@ -450,7 +465,7 @@ class MainWindow(QMainWindow):
         """Reopen a saved run in a read-only tab, without re-running anything."""
         stored = self.db.load_result(result_id) if self.db else None
         if stored is None:
-            QMessageBox.warning(self, "Result Missing",
+            dialogs.warning(self, "Result Missing",
                                 "That stored result could not be read.")
             return
 
@@ -469,7 +484,7 @@ class MainWindow(QMainWindow):
         self._show_status(f"Opened stored {short}: {n:,} {'row' if n == 1 else 'rows'}.")
 
     def _delete_stored_result(self, result_id: int):
-        answer = QMessageBox.question(
+        answer = dialogs.question(
             self, "Delete Result",
             "Delete this stored result from the case?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -482,7 +497,7 @@ class MainWindow(QMainWindow):
         self._show_status("Stored result deleted.")
 
     def _show_bookmark(self, bookmark: dict):
-        details = [f"Plugin: {bookmark.get('artifact_type') or '—'}"]
+        details = [f"Plugin: {bookmark.get('artifact_type') or '-'}"]
         if bookmark.get("tag"):
             details.append(f"Tag: {bookmark['tag']}")
         if bookmark.get("source_name"):
@@ -493,7 +508,7 @@ class MainWindow(QMainWindow):
             details.append(f"Added: {bookmark['created_at']}")
         details.append("")
         details.append(bookmark.get("description") or "")
-        QMessageBox.information(
+        dialogs.information(
             self, bookmark.get("label") or "Bookmark", "\n".join(details)
         )
 
@@ -553,6 +568,12 @@ class MainWindow(QMainWindow):
         search_action.setShortcut("Ctrl+P")
         search_action.triggered.connect(lambda: self.ribbon.focus_search())
         view_menu.addAction(search_action)
+
+        self.compact_action = QAction("Compact Plugin Tiles", self)
+        self.compact_action.setCheckable(True)
+        self.compact_action.setChecked(bool(self.settings.get("compact_tiles", True)))
+        self.compact_action.toggled.connect(self._set_compact_tiles)
+        view_menu.addAction(self.compact_action)
 
         view_menu.addSeparator()
         font_action = QAction("Interface Font…", self)
@@ -621,13 +642,20 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
 
+    def _set_compact_tiles(self, compact: bool):
+        """Switch tile density and remember it for the next session."""
+        self.ribbon.set_compact(compact)
+        if self.compact_action.isChecked() != compact:
+            self.compact_action.setChecked(compact)       # re-enters once, no-op
+        self.settings = settings.save(compact_tiles=compact)
+
     def _build_case_header(self) -> QWidget:
         """
         Who and what, at the top of the sidebar: the case, the image it is
         working on, and what that image turned out to be.
 
         These three facts used to sit in a title bar beside the product name.
-        They belong here — the sidebar is where the case is navigated, so the
+        They belong here: the sidebar is where the case is navigated, so the
         case identifies itself at the head of it.
         """
         header = QWidget()
@@ -641,13 +669,13 @@ class MainWindow(QMainWindow):
         self.os_glyph = QLabel()
         self.os_glyph.setObjectName("osGlyph")
         self.os_glyph.setFixedWidth(18)
-        self.case_tag = QLabel(self.case.case_name)
+        self.case_tag = plain_label(self.case.case_name)
         self.case_tag.setObjectName("caseNameLabel")
         self.case_tag.setWordWrap(True)
         title_row.addWidget(self.os_glyph, 0, Qt.AlignmentFlag.AlignTop)
         title_row.addWidget(self.case_tag, 1)
 
-        self.image_lbl = QLabel()
+        self.image_lbl = plain_label()
         self.image_lbl.setObjectName("imageLabel")
         self.image_lbl.setProperty("loaded", "false")
         self._set_image_label(self.case.image_path)
@@ -670,7 +698,7 @@ class MainWindow(QMainWindow):
     def _build_overview_tab(self) -> QWidget:
         """
         The Case tab: the case's own details, the evidence, and what the probe
-        made of it — editable in place.
+        made of it: editable in place.
 
         Collecting these in a wizard before the case opened meant describing an
         image nobody had looked at yet, in a window that then went away. They
@@ -730,7 +758,12 @@ class MainWindow(QMainWindow):
         row = len(editable) // 2
         notes_label = QLabel("Notes")
         notes_label.setObjectName("fieldLabel")
-        self.notes_edit = QTextEdit(self.case.notes or "")
+        # QTextEdit(text) parses its argument as HTML: notes from a case.json
+        # someone else wrote were rendered (and could load <img> paths), and
+        # "PID <1000" style text was lost when the parsed version was saved.
+        self.notes_edit = QTextEdit()
+        self.notes_edit.setAcceptRichText(False)
+        self.notes_edit.setPlainText(self.case.notes or "")
         self.notes_edit.setPlaceholderText("Scope, authorisation, working hypotheses…")
         self.notes_edit.setFixedHeight(72)
         # A QTextEdit has no editingFinished; commit when focus leaves it.
@@ -742,7 +775,7 @@ class MainWindow(QMainWindow):
         folder_label.setObjectName("fieldLabel")
         folder_row = QHBoxLayout()
         folder_row.setSpacing(6)
-        self.folder_value = QLabel(self.case.directory or "Quick Analysis — nothing is saved")
+        self.folder_value = plain_label(self.case.directory or "Quick Analysis (nothing is saved)")
         self.folder_value.setObjectName("fieldHint")
         self.folder_value.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -799,7 +832,7 @@ class MainWindow(QMainWindow):
 
         if attr == "case_name":
             self.case_tag.setText(value)
-            self.setWindowTitle(f"DumpScope — {self.case.display_label}")
+            self.setWindowTitle(f"{self.case.display_label} - DumpScope")
         self._show_status(f"Saved {attr.replace('_', ' ')}.")
 
     def _build_evidence_group(self) -> QWidget:
@@ -810,7 +843,7 @@ class MainWindow(QMainWindow):
 
         image_row = QHBoxLayout()
         image_row.setSpacing(6)
-        self.evidence_lbl = QLabel()
+        self.evidence_lbl = plain_label()
         self.evidence_lbl.setObjectName("fieldHint")
         self.evidence_lbl.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -885,11 +918,16 @@ class MainWindow(QMainWindow):
         facts.extend(self.profile.details.items())
 
         if not facts:
-            placeholder = QLabel(
-                "Load an image to identify it."
-                if not self.case.image_path else
-                "Identifying the image…"
-            )
+            if not self.case.image_path:
+                text = "Load an image to identify it."
+            elif self._os_probe is not None:
+                text = ("Identifying the image. On a new case this includes "
+                        "downloading its kernel symbols, which can take a few minutes; "
+                        "plugins started meanwhile wait for it.")
+            else:
+                text = "The image has not been identified."
+            placeholder = QLabel(text)
+            placeholder.setWordWrap(True)
             placeholder.setObjectName("overviewBlurb")
             grid.addWidget(placeholder, 0, 0, 1, 4)
             return
@@ -899,7 +937,8 @@ class MainWindow(QMainWindow):
             row, column = divmod(index, 2)
             name = QLabel(label)
             name.setObjectName("fieldLabel")
-            field = QLabel(str(value))
+            # windows.info values are read out of the image's own memory.
+            field = plain_label(str(value))
             field.setObjectName("fieldValue")
             field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             field.setWordWrap(True)
@@ -936,6 +975,8 @@ class MainWindow(QMainWindow):
         probe.note.connect(self._show_status)
         probe.finished.connect(lambda: setattr(self, "_os_probe", None))
         self._os_probe = probe
+        self.profile = ImageProfile()
+        self._refresh_image_facts()
         probe.start()
 
     def _on_sniffed(self, profile: ImageProfile):
@@ -943,10 +984,10 @@ class MainWindow(QMainWindow):
         if profile.os:
             self.profile = profile
             self.set_os(profile.os)
-            self._show_status(f"{profile.summary()} — confirming…")
+            self._show_status(f"{profile.summary()}. Confirming...")
         elif profile.container:
             self._show_status(
-                f"{profile.container} — identifying the operating system…"
+                f"{profile.container}. Identifying the operating system..."
             )
 
     def _on_profiled(self, profile: ImageProfile):
@@ -955,7 +996,7 @@ class MainWindow(QMainWindow):
         if profile.os:
             self.set_os(profile.os)
         # set_os is a no-op when the sniff already chose this OS, so the badge
-        # is refreshed unconditionally — otherwise it stays on "Identifying…".
+        # is refreshed unconditionally: otherwise it stays on "Identifying…".
         self._update_os_badge()
         self._refresh_image_facts()
         if profile.confidence == "assumed":
@@ -964,7 +1005,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self._show_status(
-                f"{profile.summary()} — {self.ribbon.plugin_count()} plugins available."
+                f"{profile.summary()}. {self.ribbon.plugin_count()} plugins available."
             )
         if self.db and self.active_source_id and profile.os:
             try:
@@ -992,7 +1033,7 @@ class MainWindow(QMainWindow):
         if quiet:
             return
         self._show_status(
-            f"Showing {label} plugins — {self.ribbon.plugin_count()} available."
+            f"Showing {label} plugins ({self.ribbon.plugin_count()} available)."
         )
 
     def _set_badge_probing(self):
@@ -1029,13 +1070,13 @@ class MainWindow(QMainWindow):
     def _on_plugin_clicked(self, plugin_id: str):
         image_path = self.case.image_path
         if not image_path:
-            QMessageBox.warning(
+            dialogs.warning(
                 self, "No Image Loaded",
                 "Load a memory image first (File → Open Image).",
             )
             return
         if not os.path.exists(image_path):
-            QMessageBox.critical(
+            dialogs.critical(
                 self, "Image Missing",
                 f"The image is no longer at:\n\n{image_path}",
             )
@@ -1046,7 +1087,7 @@ class MainWindow(QMainWindow):
 
         info = self.registry.get(plugin_id)
         if info is None:
-            QMessageBox.warning(self, "Unknown Plugin",
+            dialogs.warning(self, "Unknown Plugin",
                                 f"{plugin_id} is not available in this volatility3.")
             return
 
@@ -1111,7 +1152,7 @@ class MainWindow(QMainWindow):
         Attach a runner to a panel.
 
         Keyed by `run_key` rather than by plugin id, because an extraction runs
-        the same plugin as the listing it was started from — keying by plugin
+        the same plugin as the listing it was started from: keying by plugin
         would make "dump PID 4" and the pslist tab it came from the same run,
         and cancelling either would stop the other.
         """
@@ -1176,7 +1217,7 @@ class MainWindow(QMainWindow):
                     if written else
                     "volatility3 reported success but wrote no files."
                 )
-                self._show_status(f"Extraction finished — {message}")
+                self._show_status(f"Extraction finished: {message}")
                 self.notifier.notify(
                     "Extraction finished", message,
                     "success" if written else "warning",
@@ -1188,9 +1229,9 @@ class MainWindow(QMainWindow):
             self._show_status(f"{short} cancelled.")
         elif exit_code == 0:
             self._show_status(f"{short} finished: {rows:,} {'row' if rows == 1 else 'rows'}.")
-            # Inside a batch (Collect, credential sweep, several clicks) each
-            # success would stack a toast over the work; the batch is announced
-            # once when it ends. Failures are always announced.
+            # Inside a batch (Collect, credential sweep, several clicks) the
+            # batch is announced once when it ends, not once per plugin.
+            # Failures are always announced.
             if self._batch_size < 2:
                 self.notifier.notify(
                     f"{short} finished", f"{rows:,} rows{elapsed}", "success")
@@ -1198,12 +1239,12 @@ class MainWindow(QMainWindow):
             self._show_status(f"{short} failed (exit {exit_code}). See the Log tab.")
             self.notifier.notify(
                 f"{short} failed",
-                f"Exit code {exit_code}{elapsed} — see the Log tab.", "error",
+                f"Exit code {exit_code}{elapsed}. See the Log tab.", "error",
             )
         self._announce_idle()
 
     def _elapsed(self, run_key: str) -> str:
-        """" — 1m 12s", or nothing if the run was never timed."""
+        """" in 1m 12s", or "" if the run was never timed."""
         started = self._run_started.pop(run_key, None)
         if started is None:
             return ""
@@ -1275,7 +1316,7 @@ class MainWindow(QMainWindow):
     def _export_current(self):
         panel = self.tabs.currentWidget()
         if not isinstance(panel, ResultPanel):
-            QMessageBox.information(
+            dialogs.information(
                 self, "Nothing to Export",
                 "Switch to a results tab before exporting.",
             )
@@ -1285,10 +1326,10 @@ class MainWindow(QMainWindow):
 
     def _save_bookmark(self, payload: dict):
         if not self.db:
-            QMessageBox.information(
+            dialogs.information(
                 self, "No Case Database",
-                "Bookmarks belong to a case. Quick Analysis keeps nothing — "
-                "create a case to record findings.",
+                "Bookmarks are stored in a case, and Quick Analysis does not save "
+                "anything. Create a case to record findings.",
             )
             return
 
@@ -1308,7 +1349,7 @@ class MainWindow(QMainWindow):
                 source_id=self.active_source_id,
             )
         except Exception as exc:
-            QMessageBox.warning(self, "Bookmark Failed", str(exc))
+            dialogs.warning(self, "Bookmark Failed", str(exc))
             return
         self._refresh_case_tree()
         self._show_status(f"Bookmarked: {values['label']}")
@@ -1332,10 +1373,10 @@ class MainWindow(QMainWindow):
         the table has been sorted or the plugin re-run.
         """
         if self.db is None:
-            QMessageBox.information(
+            dialogs.information(
                 self, "No Case Database",
-                "Tags belong to a case. Quick Analysis keeps nothing — create a "
-                "case to record findings.",
+                "Tags are stored in a case, and Quick Analysis does not save "
+                "anything. Create a case to record findings.",
             )
             return
 
@@ -1358,7 +1399,7 @@ class MainWindow(QMainWindow):
                 row=payload, cell_column=column, cell_value=cell,
             )
         except Exception as exc:
-            QMessageBox.warning(self, "Tag Failed", str(exc))
+            dialogs.warning(self, "Tag Failed", str(exc))
             return
         self._refresh_case_tree()
         self._show_status(f"Tagged as {name}: {label}")
@@ -1389,7 +1430,7 @@ class MainWindow(QMainWindow):
         if not ok or not new_name.strip():
             return
         if not self.db.rename_tag(old_name, new_name.strip()):
-            QMessageBox.warning(
+            dialogs.warning(
                 self, "Rename Failed",
                 f"“{new_name.strip()}” already exists. Merging two tags is a "
                 "different decision from renaming one, so it is not done "
@@ -1418,6 +1459,7 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("Delete Tag")
         box.setIcon(QMessageBox.Icon.Question)
+        box.setTextFormat(Qt.TextFormat.PlainText)      # the name may be anyone's
         box.setText(f"Delete the tag “{name}”?")
         box.setInformativeText(
             f"{count} finding(s) carry it."
@@ -1466,7 +1508,7 @@ class MainWindow(QMainWindow):
                 panel = self._panel_for(plugin)
 
         if panel is None:
-            QMessageBox.information(
+            dialogs.information(
                 self, "Result Not Open",
                 f"Nothing from {plugin.rsplit('.', 1)[-1] or 'that plugin'} is "
                 "open, and the case has no saved run of it. Run it again to "
@@ -1476,11 +1518,11 @@ class MainWindow(QMainWindow):
 
         self.tabs.setCurrentWidget(panel)
         if panel.select_row(row):
-            self._show_status(f"{finding.get('label', 'Finding')} — located.")
+            self._show_status(f"Located: {finding.get('label', 'finding')}")
         else:
             self._show_status(
                 f"{finding.get('label', 'That finding')} is not in the current "
-                f"{plugin.rsplit('.', 1)[-1]} output — the image or the plugin "
+                f"{plugin.rsplit('.', 1)[-1]} output. The image or the plugin "
                 "version may differ."
             )
 
@@ -1505,16 +1547,16 @@ class MainWindow(QMainWindow):
 
         hashdump reads the NTLM hashes out of the SAM, lsadump the LSA secrets,
         cachedump the cached domain logons. None of them recovers a plaintext
-        password — that comes from cracking the hashes, or from running a
-        dumped lsass through pypykatz — so the status makes that explicit rather
+        password (that comes from cracking the hashes, or from running a
+        dumped lsass through pypykatz) so the status makes that explicit rather
         than implying passwords fall out of a button.
         """
         if not self.case.image_path or not os.path.exists(self.case.image_path):
-            QMessageBox.warning(self, "No Image Loaded",
+            dialogs.warning(self, "No Image Loaded",
                                 "Load a Windows memory image first.")
             return
         if self.current_os != "windows":
-            QMessageBox.information(
+            dialogs.information(
                 self, "Windows Only",
                 "The credential plugins read Windows registry and LSASS "
                 "structures; they do not apply to this image.",
@@ -1524,7 +1566,7 @@ class MainWindow(QMainWindow):
         available = [pid for pid in self._CREDENTIAL_PLUGINS
                      if self.registry.get(pid) is not None]
         if not available:
-            QMessageBox.warning(
+            dialogs.warning(
                 self, "Credential Plugins Missing",
                 "This volatility3 has none of the credential plugins. They need "
                 "the pycryptodome package; without it hashdump, lsadump and "
@@ -1537,7 +1579,7 @@ class MainWindow(QMainWindow):
                 self._on_plugin_clicked(plugin_id)
         self._show_status(
             f"Running {len(available)} credential plugin(s). These yield hashes "
-            "and secrets, not plaintext passwords — crack the hashes offline."
+            "and secrets, not plaintext passwords; crack the hashes offline."
         )
 
     # ── Extraction ────────────────────────────────────────────────────────────
@@ -1560,7 +1602,7 @@ class MainWindow(QMainWindow):
 
         info = self.registry.get(plugin_id)
         if info is None:
-            QMessageBox.warning(
+            dialogs.warning(
                 self, "Not Available",
                 f"{plugin_id} is not in this volatility3 installation.",
             )
@@ -1568,7 +1610,7 @@ class MainWindow(QMainWindow):
 
         target = self.dumps_dir
         if not target:
-            QMessageBox.information(
+            dialogs.information(
                 self, "No Case Folder",
                 "Quick Analysis has nowhere to put extracted files. Create a "
                 "case first.",
@@ -1577,15 +1619,15 @@ class MainWindow(QMainWindow):
         try:
             os.makedirs(target, exist_ok=True)
         except OSError as exc:
-            QMessageBox.critical(self, "Extraction Failed",
+            dialogs.critical(self, "Extraction Failed",
                                  f"Could not create {target}:\n\n{exc}")
             return
 
         if kind == "memory":
-            answer = QMessageBox.question(
+            answer = dialogs.question(
                 self, "Dump Process Memory",
                 f"Writing the full memory of PID {pid} can produce a file as "
-                "large as the process's address space — often gigabytes.\n\n"
+                "large as the process's address space, often several gigabytes.\n\n"
                 f"It will be written to:\n{target}\n\nContinue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
@@ -1648,7 +1690,7 @@ class MainWindow(QMainWindow):
         timeline, every result as CSV, the dumps, and a SHA-256 manifest.
         """
         if self.db is None:
-            QMessageBox.information(
+            dialogs.information(
                 self, "No Case",
                 "Quick Analysis keeps no record, so there is nothing to report on. "
                 "Create a case to generate a report.",
@@ -1695,30 +1737,73 @@ class MainWindow(QMainWindow):
         return payloads
 
     def _refresh_analysis_views(self):
+        """
+        Rebuild the timeline and insights in the background.
+
+        Decoding every stored run and re-deriving both views took seconds on a
+        case holding large results, and it happened after every plugin
+        finished: the window froze each time a run completed.
+        """
         if getattr(self, "timeline_view", None) is None:
             return
-        payloads = self._analysis_payloads()
-        have = {p.get("plugin", "") for p in payloads}
+        if self._analysis_builder is not None:
+            self._analysis_stale = True
+            return
+        self._analysis_stale = False
+        if self.db is not None:
+            db, source_id = self.db, self.active_source_id
+            load = lambda: db.latest_payloads(source_id)    # noqa: E731
+        else:
+            payloads = self._analysis_payloads()      # Quick Analysis: open tabs
+            load = lambda: payloads                   # noqa: E731
+        builder = AnalysisBuilder(load, parent=self)
+        builder.built.connect(self._on_analysis_built)
+        builder.finished.connect(self._on_analysis_builder_finished)
+        self._analysis_builder = builder
+        builder.start()
+
+    def _on_analysis_built(self, have: set, events: list, findings: list, extra: dict):
+        if self._analysis_stale:
+            return                                   # a fresher rebuild follows
         runnable = (lambda p: self.registry.get(p) is not None
                     or not self.registry.available)
         timeline_missing = [p for p in timeline_missing_inputs(have) if runnable(p)]
         insight_missing = [p for p in insight_missing_inputs(have) if runnable(p)]
         try:
-            self.timeline_view.set_payloads(payloads, timeline_missing)
-            self.insights_view.set_payloads(payloads, insight_missing)
+            self.timeline_view.set_events(events, timeline_missing,
+                                          findings=findings, captured=extra.get("captured"))
+            self.insights_view.set_findings(findings, insight_missing,
+                                            have=have)
+            flagged: dict[str, list[str]] = {}
+            for finding in findings:
+                if finding.pid:
+                    flagged.setdefault(finding.pid, []).append(finding.title)
+            self.memory_view.set_programs(extra.get("programs"), flagged)
         except Exception as exc:              # analysis must never take the window down
-            log.exception("Could not rebuild the timeline/insights: %s", exc)
+            log.exception("Could not show the timeline/insights: %s", exc)
             return
         high = sum(1 for f in self.insights_view.findings if f.severity == "high")
         index = self.tabs.indexOf(self.insights_view)
         if index >= 0:
             self.tabs.setTabText(index, f"Insights ({high})" if high else "Insights")
 
+    def _on_analysis_builder_finished(self):
+        builder, self._analysis_builder = self._analysis_builder, None
+        if builder is not None:
+            builder.deleteLater()
+        if self._analysis_stale:
+            self._refresh_analysis_views()
+
+    @property
+    def analysis_busy(self) -> bool:
+        """True while the timeline and insights are being rebuilt."""
+        return self._analysis_builder is not None or self._analysis_stale
+
     def _collect(self, plugins: list[str]):
         """Run each listed plugin that is not running already; they queue on the gate."""
         image_path = self.case.image_path
         if not image_path or not os.path.exists(image_path):
-            QMessageBox.warning(self, "No Image Loaded",
+            dialogs.warning(self, "No Image Loaded",
                                 "Load a memory image first (File → Open Image).")
             return
         current = self.tabs.currentWidget()
@@ -1733,10 +1818,10 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentWidget(current)
         if started:
             self._show_status(
-                f"Collecting: {', '.join(started)} — they run one at a time; this "
-                "view updates as each finishes.")
+                f"Collecting: {', '.join(started)}. This view updates as each "
+                "plugin finishes.")
         else:
-            self._show_status("Nothing to collect — those plugins have already run.")
+            self._show_status("Nothing to collect. Those plugins have already run.")
 
     def _show_plugin_output(self, plugin: str):
         """Bring up the output an event or finding came from."""
@@ -1750,6 +1835,21 @@ class MainWindow(QMainWindow):
             for result in self.db.get_results(plugin=plugin, source_id=self.active_source_id):
                 self._open_stored_result(result["id"])
                 return
+
+    def _show_process(self, pid: str):
+        """Open the process list filtered to one PID."""
+        for plugin in ("windows.pslist.PsList", "windows.pstree.PsTree",
+                       "windows.psscan.PsScan", MEMORY_PLUGIN):
+            if self._panel_for(plugin) is None and not (
+                    self.db is not None
+                    and self.db.get_results(plugin=plugin, source_id=self.active_source_id)):
+                continue
+            self._show_plugin_output(plugin)
+            panel = self._panel_for(plugin)
+            if panel is not None:
+                panel.filter_box.setText(str(pid))
+            return
+        self._show_status("Run PsList to see the process list.")
 
     def _bookmark_insight(self, finding):
         if self.db is None:
@@ -1769,7 +1869,7 @@ class MainWindow(QMainWindow):
     def _close_case(self):
         """Return to the case manager without leaving the application."""
         if self._runners:
-            answer = QMessageBox.question(
+            answer = dialogs.question(
                 self, "Analysis Running",
                 f"{len(self._runners)} plugin(s) are still running. Stop them "
                 "and close the case?",
@@ -1791,7 +1891,7 @@ class MainWindow(QMainWindow):
         self.ribbon.reload(self.registry)
         self._refresh_image_facts()
         self._show_status(
-            f"Plugin list refreshed — volatility3 {self.registry.vol_version}, "
+            f"Plugin list refreshed: volatility3 {self.registry.vol_version}, "
             f"{len(self.registry.all())} plugins."
         )
 
@@ -1808,11 +1908,11 @@ class MainWindow(QMainWindow):
         if not isinstance(widget, ResultPanel):
             return
         if self.tabs.is_pinned(widget):
-            self._show_status("This tab is pinned — unpin it first to close it.")
+            self._show_status("This tab is pinned. Unpin it to close it.")
             return
         plugin_id = getattr(widget, "run_key", "") or widget.plugin_id
         if plugin_id in self._runners:
-            answer = QMessageBox.question(
+            answer = dialogs.question(
                 self, "Stop Analysis?",
                 f"{widget.plugin_name} is still running. Stop it and close the tab?",
             )
@@ -1835,7 +1935,7 @@ class MainWindow(QMainWindow):
     def apply_theme(self):
         QApplication.instance().setStyleSheet(build_theme(dark=self.is_dark))
         # Tiles and badges are styled by property, so the new sheet reaches them
-        # without any per-widget work — but Qt needs telling to re-evaluate the
+        # without any per-widget work, but Qt needs telling to re-evaluate the
         # property-driven rules.
         icons.clear_cache()
         self._update_os_badge()
@@ -1847,6 +1947,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "timeline_view", None) is not None:
             self.timeline_view.set_dark(self.is_dark)
             self.insights_view.set_dark(self.is_dark)
+            self.memory_view.set_dark(self.is_dark)
         if getattr(self, "case_tree", None) is not None:
             self.case_tree.apply_theme(self.is_dark)
             self._refresh_case_tree()
@@ -1920,10 +2021,7 @@ class MainWindow(QMainWindow):
             return
         self._save_fonts(ui_font=chosen.family(),
                          font_size=chosen.pointSize() or current["size"])
-        self.notifier.notify(
-            "Interface font changed",
-            f"{chosen.family()} at {chosen.pointSize()}pt", "info",
-        )
+        self._show_status(f"Interface font: {chosen.family()} at {chosen.pointSize()}pt.")
 
     def _choose_mono_font(self):
         """Pick the fixed-width font used for offsets, hex and the log."""
@@ -1934,7 +2032,7 @@ class MainWindow(QMainWindow):
         if not accepted:
             return
         self._save_fonts(mono_font=chosen.family())
-        self.notifier.notify("Monospace font changed", chosen.family(), "info")
+        self._show_status(f"Monospace font: {chosen.family()}.")
 
     def _reset_fonts(self):
         self._save_fonts(ui_font="", mono_font="", font_size=BASE_FONT_SIZE)
@@ -1970,7 +2068,7 @@ class MainWindow(QMainWindow):
         self.notifier.set_desktop_enabled(bool(enabled))
         self._show_status(
             "Desktop notifications on." if enabled else
-            "Desktop notifications off — messages still appear in the window."
+            "Desktop notifications off. Messages still appear in the status bar."
         )
 
     # ── Command palette ───────────────────────────────────────────────────────
@@ -1988,7 +2086,7 @@ class MainWindow(QMainWindow):
         that can be run against the current image.
 
         Built fresh on each open rather than cached, because most of it depends
-        on state — which OS the ribbon is scoped to, whether an image is
+        on state: which OS the ribbon is scoped to, whether an image is
         loaded, which tags exist.
         """
         from ui.command_palette import Command
@@ -2022,9 +2120,9 @@ class MainWindow(QMainWindow):
                     shortcut="Ctrl+T", glyph="sun" if self.is_dark else "moon"),
             Command("Search Plugins", self.ribbon.focus_search, group="View",
                     shortcut="Ctrl+P", glyph="search"),
-            Command("Large Plugin Tiles", lambda: self.ribbon.set_compact(False),
+            Command("Large Plugin Tiles", lambda: self._set_compact_tiles(False),
                     group="View", glyph="layers", keywords="density comfortable big"),
-            Command("Compact Plugin Tiles", lambda: self.ribbon.set_compact(True),
+            Command("Compact Plugin Tiles", lambda: self._set_compact_tiles(True),
                     group="View", glyph="layers", keywords="density small dense"),
             Command("Go to Case Tab", lambda: self.tabs.setCurrentIndex(0),
                     group="View", glyph="badge", keywords="details examiner notes"),
@@ -2047,7 +2145,7 @@ class MainWindow(QMainWindow):
             Command("Reset Fonts", self._reset_fonts, group="View", glyph="news"),
             Command("Toggle Desktop Notifications",
                     lambda: self.notify_action.toggle(), group="View",
-                    glyph="signal", keywords="alerts toast tray popup"),
+                    glyph="signal", keywords="alerts notify tray popup"),
         ]
         for os_name, (glyph, label) in OS_BADGES.items():
             commands.append(Command(
@@ -2074,31 +2172,57 @@ class MainWindow(QMainWindow):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.case.directory))
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # Toasts are children positioned by hand, so they have to be moved back
-        # into the corner when the corner moves.
-        if getattr(self, "notifier", None) is not None:
-            self.notifier.handle_resize()
-
     # ── Shutdown ──────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
         if getattr(self, "notifier", None) is not None:
             self.notifier.shutdown()
-        if self._os_probe is not None:
-            self._os_probe.cancel()
-            self._os_probe.wait(2000)
-        for runner in list(self._runners.values()):
-            runner.cancel()
-        for runner in list(self._runners.values()):
-            if not runner.wait(3000):
-                log.warning("A volatility3 run did not stop in time")
+        # Every worker is parented to this window, and a QThread destroyed
+        # while running aborts the process. Stop them all first, then wait
+        # without a timeout: cancelling kills a vol3 process that ignores
+        # SIGTERM after a few seconds, so each wait ends.
+        hash_worker = getattr(self, "_hash_worker", None)
+        workers = [self._os_probe, hash_worker, *self._hashers, *self._runners.values()]
+        workers = [w for w in workers if w is not None]
+        for worker in workers:
+            worker.cancel()
+        self._analysis_stale = False
+        for worker in workers + [self._analysis_builder]:
+            if worker is not None:
+                worker.wait()
         self._runners.clear()
         super().closeEvent(event)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+class AnalysisBuilder(QThread):
+    """
+    Loads stored output and derives the timeline and insights from it.
+
+    `load` is called on the worker thread. Database methods open their own
+    connection per call, so a read from here does not share the GUI's.
+    """
+
+    built = pyqtSignal(object, object, object, object)  # plugins seen, events, findings, extra
+
+    def __init__(self, load, parent=None):
+        super().__init__(parent)
+        self._load = load
+
+    def run(self):
+        try:
+            payloads = self._load()
+            have = {p.get("plugin", "") for p in payloads}
+            memory = latest_payload(payloads)
+            extra = {
+                "programs": programs_from_payload(memory) if memory else [],
+                "captured": capture_time(payloads),
+            }
+            self.built.emit(have, build_events(payloads), analyse(payloads), extra)
+        except Exception:                 # analysis must never take the window down
+            log.exception("Could not rebuild the timeline/insights")
+
 
 def _listing(directory: str) -> set[str]:
     """The file names directly inside `directory`. Empty if it cannot be read."""
@@ -2130,11 +2254,11 @@ def _row_label(row: dict) -> str:
 
 def _format_size(path: str) -> str:
     if not path or not os.path.exists(path):
-        return "—"
+        return "-"
     try:
         size = float(os.path.getsize(path))
     except OSError:
-        return "—"
+        return "-"
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if size < 1024:
             return f"{size:.1f} {unit}"
