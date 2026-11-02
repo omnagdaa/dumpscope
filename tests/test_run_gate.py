@@ -2,6 +2,7 @@
 The RunGate: volatility3 processes run one at a time unless the examiner
 raises the limit, and a queued run can always be cancelled.
 """
+import glob
 import lzma
 import os
 import threading
@@ -145,7 +146,8 @@ def _wait_for(predicate, timeout_ms=20000):
 
 def _intervals(trace_path):
     starts, ends = {}, {}
-    for line in open(trace_path):
+    lines = [line for path in glob.glob(f"{trace_path}.*") for line in open(path)]
+    for line in lines:
         kind, pid, stamp = line.split()
         (starts if kind == "start" else ends)[pid] = float(stamp)
     return sorted((starts[p], ends[p]) for p in starts)

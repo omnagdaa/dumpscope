@@ -324,6 +324,8 @@ BUNDLED_PREFIX = "dumpscope."
 # symbols.__path__ is the same list object, so editing it in place covers both.
 _CLI_ENTRY = (
     "import os, socket, sys; sys.argv[0] = 'vol'\n"
+    # Windows would turn each "\n" vol3 writes into "\r\n", inside values too.
+    "sys.stdout and sys.stdout.reconfigure(newline='\\n')\n"
     f"socket.setdefaulttimeout({DOWNLOAD_STALL_SECONDS})\n"
     "if os.environ.get('DUMPSCOPE_CASE_SYMBOLS'):\n"
     "    from volatility3.framework import constants as c\n"

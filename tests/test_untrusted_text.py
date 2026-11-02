@@ -12,6 +12,7 @@ import re
 import sys
 import time
 
+import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
@@ -75,6 +76,7 @@ def test_case_notes_are_not_parsed_as_html(qapp, tmp_path):
         window.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows forbids < > in folder names")
 def test_recent_case_tooltip_is_escaped(qapp, tmp_path):
     from core.case import _write_recent
     from ui.case_manager import CaseManager

@@ -220,7 +220,7 @@ def test_deleted_dump_is_reported_not_fatal(case_db):
     path = _add_dump(case, db, source_id)
     os.unlink(path)
     result = build_bundle(case, db)
-    assert result.dumps_missing == [path]
+    assert result.dumps_missing == [os.path.normpath(path)]
 
 
 def test_unreadable_dump_becomes_a_warning(case_db, monkeypatch):

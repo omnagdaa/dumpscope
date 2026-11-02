@@ -21,6 +21,8 @@ import os
 import sys
 import time
 
+sys.stdout.reconfigure(newline="\n")    # as _CLI_ENTRY does for vol3
+
 mode = "rows"
 for index, arg in enumerate(sys.argv):
     if arg == "--stub-mode":
@@ -76,14 +78,14 @@ if os.environ.get("STUB_VOL_FIXTURES"):
 if mode == "slow":
     trace = _arg("--stub-trace")
     if trace:
-        with open(trace, "a") as handle:
+        with open(f"{trace}.{os.getpid()}", "a") as handle:
             handle.write(f"start {os.getpid()} {time.monotonic()}\n")
     print("PID,Name")
     for i in range(3):
         print(f"{i},slow{i}", flush=True)
         time.sleep(float(_arg("--stub-delay", "0.3")))
     if trace:
-        with open(trace, "a") as handle:
+        with open(f"{trace}.{os.getpid()}", "a") as handle:
             handle.write(f"end {os.getpid()} {time.monotonic()}\n")
     sys.exit(0)
 

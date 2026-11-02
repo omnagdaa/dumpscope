@@ -70,6 +70,7 @@ def test_heavy_stderr_does_not_deadlock(qapp, stub_vol):
     assert len(out["rows"]) == 2000
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX process groups")
 def test_naive_sequential_read_really_does_deadlock(stub_vol):
     """
     Pins the behaviour the runner exists to avoid, so the fix cannot silently
@@ -178,7 +179,7 @@ class TestFindingVolatility3:
         assert vol_runner._script_command() is None
 
     def test_falls_back_to_the_script_when_the_library_is_absent(self, monkeypatch, tmp_path):
-        script = tmp_path / "vol"
+        script = tmp_path / ("vol.exe" if sys.platform == "win32" else "vol")
         script.write_text("#!/bin/sh\n")
         script.chmod(0o755)
         monkeypatch.setattr(vol_runner, "_module_command", lambda: None)

@@ -53,7 +53,11 @@ def _isolated_config(monkeypatch, tmp_path_factory):
     from core import settings
     from core.vol_runner import RUN_GATE
 
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("config")))
+    config = str(tmp_path_factory.mktemp("config"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", config)
+    # XDG is Linux-only; Windows and macOS would use the real user folder.
+    for module in ("core.case", "core.settings"):
+        monkeypatch.setattr(f"{module}.config_dir", lambda: os.path.join(config, "dumpscope"))
     # Windows opened by tests must not post to the developer's real desktop.
     from ui import notifications
     monkeypatch.setattr(notifications.Notifier, "_post", lambda self, *a: None)
